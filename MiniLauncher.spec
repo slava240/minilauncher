@@ -1,35 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
-import sys
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all
 
-# Собираем все данные и бинарники зависимостей
-mc_datas, mc_binaries, mc_hiddenimports = collect_all('minecraft_launcher_lib')
-req_datas, req_binaries, req_hiddenimports = collect_all('requests')
+datas = []
+binaries = []
+hiddenimports = ['PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw', 'tkinter', 'tkinter.colorchooser', 'hashlib', 'tarfile', 'zipfile', 'socket']
+tmp_ret = collect_all('minecraft_launcher_lib')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('customtkinter')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('requests')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 
 a = Analysis(
     ['launcher.py'],
     pathex=[],
-    binaries=mc_binaries + req_binaries,
-    datas=mc_datas + req_datas,
-    hiddenimports=(
-        mc_hiddenimports + req_hiddenimports + [
-            'tkinter', 'tkinter.ttk', 'tkinter.messagebox',
-            'tkinter.scrolledtext', 'tkinter.font',
-            'urllib.request', 'urllib.parse', 'urllib.error',
-            'json', 'threading', 'subprocess', 'os', 'sys',
-            'certifi', 'charset_normalizer', 'idna', 'urllib3',
-        ]
-    ),
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        'matplotlib', 'numpy', 'pandas', 'scipy',
-        'PIL', 'cv2', 'PyQt5', 'PyQt6', 'wx',
-    ],
+    excludes=[],
     noarchive=False,
+    optimize=0,
 )
-
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -42,14 +37,13 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,          # UPX отключён — частая причина DLL ошибок
+    upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,      # windowed (без консоли)
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
 )

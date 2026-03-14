@@ -1,2049 +1,2017 @@
 """
-MiniLauncher v1.0.0
-pip install minecraft-launcher-lib requests
-pyinstaller --onefile --windowed --collect-all minecraft_launcher_lib --collect-all requests --name MiniLauncher launcher.py
+MiniLauncher v1.1.0  –  CustomTkinter edition
+pip install minecraft-launcher-lib requests pillow customtkinter
 """
-
+# ─── stdlib ───────────────────────────────────────────────────────────────────
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
-import threading
-import json
-import os
-import sys
-import subprocess
-import urllib.request
-import urllib.parse
-import shutil
-import webbrowser
+from tkinter import messagebox, colorchooser
+import threading, json, os, sys, subprocess, urllib.request, urllib.parse
+import shutil, webbrowser, socket, time, re, hashlib
+from io import BytesIO
 
-# ─── HTTP helpers ─────────────────────────────────────────────────────────────
+# ─── CustomTkinter ────────────────────────────────────────────────────────────
+import customtkinter as ctk
+ctk.set_default_color_theme("dark-blue")
+
+# ─── PIL (optional) ───────────────────────────────────────────────────────────
+try:
+    from PIL import Image, ImageTk, ImageDraw
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
+
+# ─── HTTP ─────────────────────────────────────────────────────────────────────
 try:
     import requests as _req
-    def http_get(url, params=None, timeout=10):
-        if params:
-            url = url + "?" + urllib.parse.urlencode(params)
-        r = _req.get(url, headers={"User-Agent": "MiniLauncher/1.0"}, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+    def http_get(url, params=None, timeout=10, headers=None):
+        h = {"User-Agent": "MiniLauncher/1.1"}
+        if headers: h.update(headers)
+        if params:  url += "?" + urllib.parse.urlencode(params)
+        r = _req.get(url, headers=h, timeout=timeout); r.raise_for_status(); return r.json()
+    def http_get_bytes(url, timeout=10):
+        return _req.get(url, headers={"User-Agent":"MiniLauncher/1.1"}, timeout=timeout).content
+    def http_post(url, data, timeout=15, headers=None):
+        h = {"User-Agent":"MiniLauncher/1.1","Content-Type":"application/json"}
+        if headers: h.update(headers)
+        r = _req.post(url, json=data, headers=h, timeout=timeout); r.raise_for_status(); return r.json()
     def http_download(url, dest, progress_cb=None):
-        with _req.get(url, stream=True, timeout=120,
-                      headers={"User-Agent": "MiniLauncher/1.0"}) as r:
+        with _req.get(url, stream=True, timeout=120, headers={"User-Agent":"MiniLauncher/1.1"}) as r:
             r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-            done  = 0
+            total = int(r.headers.get("content-length", 0)); done = 0
             with open(dest, "wb") as f:
                 for chunk in r.iter_content(65536):
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress_cb and total:
-                        progress_cb(done, total)
+                    f.write(chunk); done += len(chunk)
+                    if progress_cb and total: progress_cb(done, total)
 except ImportError:
-    def http_get(url, params=None, timeout=10):
-        if params:
-            url = url + "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"User-Agent": "MiniLauncher/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+    def http_get(url, params=None, timeout=10, headers=None):
+        if params: url += "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent":"MiniLauncher/1.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as r: return json.loads(r.read().decode())
+    def http_get_bytes(url, timeout=10):
+        req = urllib.request.Request(url, headers={"User-Agent":"MiniLauncher/1.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as r: return r.read()
+    def http_post(url, data, timeout=15, headers=None):
+        body = json.dumps(data).encode()
+        req  = urllib.request.Request(url, data=body, method="POST",
+               headers={"Content-Type":"application/json","User-Agent":"MiniLauncher/1.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as r: return json.loads(r.read().decode())
     def http_download(url, dest, progress_cb=None):
-        req = urllib.request.Request(url, headers={"User-Agent": "MiniLauncher/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent":"MiniLauncher/1.1"})
         with urllib.request.urlopen(req, timeout=120) as r:
-            total = int(r.headers.get("Content-Length", 0))
-            done  = 0
+            total = int(r.headers.get("Content-Length",0)); done = 0
             with open(dest, "wb") as f:
                 while True:
                     chunk = r.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress_cb and total:
-                        progress_cb(done, total)
+                    if not chunk: break
+                    f.write(chunk); done += len(chunk)
+                    if progress_cb and total: progress_cb(done, total)
 
 import minecraft_launcher_lib
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-if getattr(sys, "frozen", False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ─── Paths ─────────────────────────────────────────────────────────────────────
+if getattr(sys,"frozen",False): BASE_DIR = os.path.dirname(sys.executable)
+else:                            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MC_DIR      = os.path.join(BASE_DIR, "minecraft")
-SERVERS_DIR = os.path.join(BASE_DIR, "servers")
-SETTINGS_F  = os.path.join(BASE_DIR, "settings.json")
-SERVERS_F   = os.path.join(BASE_DIR, "servers.json")
+MC_DIR        = os.path.join(BASE_DIR,"minecraft")
+SERVERS_DIR   = os.path.join(BASE_DIR,"servers")
+INSTANCES_DIR = os.path.join(BASE_DIR,"instances")
+JAVA_DIR      = os.path.join(BASE_DIR,"java")
+SETTINGS_F    = os.path.join(BASE_DIR,"settings.json")
+SERVERS_F     = os.path.join(BASE_DIR,"servers.json")
+ACCOUNTS_F    = os.path.join(BASE_DIR,"accounts.json")
+INSTANCES_F   = os.path.join(BASE_DIR,"instances.json")
 
-CONTENT_DIRS = {
-    "mod":          os.path.join(MC_DIR, "mods"),
-    "resourcepack": os.path.join(MC_DIR, "resourcepacks"),
-    "shader":       os.path.join(MC_DIR, "shaderpacks"),
-    "datapack":     os.path.join(MC_DIR, "datapacks"),
-    "modpack":      os.path.join(MC_DIR, "modpacks"),
-}
-for _d in [MC_DIR, SERVERS_DIR] + list(CONTENT_DIRS.values()):
-    os.makedirs(_d, exist_ok=True)
+for _d in [MC_DIR,SERVERS_DIR,INSTANCES_DIR,JAVA_DIR,
+           os.path.join(MC_DIR,"mods"),os.path.join(MC_DIR,"resourcepacks"),
+           os.path.join(MC_DIR,"shaderpacks"),os.path.join(MC_DIR,"datapacks")]:
+    os.makedirs(_d,exist_ok=True)
 
-# ─── Version & update ─────────────────────────────────────────────────────────
-APP_VERSION   = "1.0.0"
+# ─── Constants ─────────────────────────────────────────────────────────────────
+APP_VERSION   = "1.1.0"
 GITHUB_REPO   = "slava240/minilauncher"
+GITHUB_URL    = f"https://github.com/{GITHUB_REPO}"
 GITHUB_API    = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-GITHUB_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+GITHUB_REL    = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+MS_CLIENT_ID  = "00000000402b5328"
+MS_DEVICE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
+MS_TOKEN_URL  = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+MS_SCOPE      = "XboxLive.signin offline_access"
+XBL_URL       = "https://user.auth.xboxlive.com/user/authenticate"
+XSTS_URL      = "https://xsts.auth.xboxlive.com/xsts/authorize"
+MC_AUTH_URL   = "https://api.minecraftservices.com/authentication/login_with_xbox"
+MC_PROFILE    = "https://api.minecraftservices.com/minecraft/profile"
+ELY_AUTH_URL  = "https://authserver.ely.by/auth/authenticate"
+ELY_SKIN_URL  = "https://skinsystem.ely.by/skins/{username}.png"
+JAVA_API      = "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?os={os}&arch=x64&image_type=jre"
+JAVA_OS_MAP   = {"win32":"windows","linux":"linux","darwin":"mac"}
+MODRINTH_API  = {"original":"https://api.modrinth.com/v2","mirror_rf":"https://modrinth.black/v2"}
+
+SERVER_CORES  = {
+    "Paper":       {"color":"#3a8fd9","desc":"High-performance Spigot fork. Recommended.",
+                    "versions":["1.21.4","1.21.3","1.21.1","1.20.6","1.20.4","1.20.2","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5","1.15.2","1.14.4","1.13.2","1.12.2"]},
+    "Purpur":      {"color":"#9b59b6","desc":"Paper fork with extra config options.",
+                    "versions":["1.21.4","1.21.3","1.21.1","1.20.6","1.20.4","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5"]},
+    "Pufferfish":  {"color":"#e07830","desc":"Optimised Paper fork for large servers.",
+                    "versions":["1.21.4","1.21.1","1.20.4","1.20.1","1.19.4","1.18.2"]},
+    "Folia":       {"color":"#20a0a0","desc":"Regionized multithreading Paper fork.",
+                    "versions":["1.21.4","1.21.1","1.20.4","1.20.1"]},
+    "Spigot":      {"color":"#e0a020","desc":"Classic Spigot server.",
+                    "versions":["1.21.4","1.21.1","1.20.6","1.20.4","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5","1.12.2","1.8.9"]},
+    "CraftBukkit": {"color":"#c08020","desc":"Original Bukkit (Spigot build).",
+                    "versions":["1.21.4","1.20.1","1.19.4","1.18.2","1.16.5","1.12.2","1.8.9"]},
+    "Fabric":      {"color":"#d4a017","desc":"Lightweight mod-loader server.",
+                    "versions":["1.21.4","1.21.3","1.21.1","1.21","1.20.6","1.20.4","1.20.2","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5"]},
+    "Forge":       {"color":"#8060c0","desc":"Forge mod-loader server.",
+                    "versions":["1.21.4","1.21.1","1.20.6","1.20.4","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5","1.15.2","1.14.4","1.12.2"]},
+    "NeoForge":    {"color":"#e05820","desc":"Community Forge fork.",
+                    "versions":["1.21.4","1.21.3","1.21.1","1.21","1.20.6","1.20.4","1.20.2","1.20.1"]},
+    "Quilt":       {"color":"#7040c0","desc":"Fabric fork with extra features.",
+                    "versions":["1.21.4","1.21.1","1.20.6","1.20.4","1.20.1","1.19.4","1.18.2"]},
+    "Mohist":      {"color":"#d04060","desc":"Forge + Bukkit/Spigot hybrid.",
+                    "versions":["1.21.1","1.20.1","1.19.4","1.18.2","1.16.5","1.12.2"]},
+    "Arclight":    {"color":"#c030a0","desc":"Forge + Paper hybrid.",
+                    "versions":["1.21.1","1.20.1","1.19.4","1.18.2","1.16.5"]},
+    "Ketting":     {"color":"#a050e0","desc":"NeoForge + Paper hybrid.",
+                    "versions":["1.21.1","1.20.4","1.20.1"]},
+    "Velocity":    {"color":"#20b0e0","desc":"Modern high-performance proxy.",
+                    "versions":["latest"]},
+    "BungeeCord":  {"color":"#60a0e0","desc":"Classic BungeeCord proxy.",
+                    "versions":["latest"]},
+    "Waterfall":   {"color":"#4080d0","desc":"PaperMC BungeeCord fork.",
+                    "versions":["latest"]},
+    "Vanilla":     {"color":"#5dbb63","desc":"Official Mojang server, no plugins.",
+                    "versions":["1.21.4","1.21.3","1.21.1","1.20.6","1.20.4","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5","1.15.2","1.14.4","1.13.2","1.12.2"]},
+    "Geyser":      {"color":"#30b080","desc":"Bedrock → Java bridge.",
+                    "versions":["latest"]},
+}
+DOWNLOADABLE = {"Paper","Purpur","Velocity","Waterfall","BungeeCord","Fabric","Vanilla"}
+
+STRIPE_C = {"mod":"#5dbb63","resourcepack":"#5090e0","shader":"#e0a830","datapack":"#c060e0","modpack":"#e05050"}
+
+# ─── colour palette per appearance ─────────────────────────────────────────────
+def _pal():
+    m = ctk.get_appearance_mode()          # "Dark" or "Light"
+    if m == "Dark":
+        return {"bg":"#1a1a24","bg2":"#13131a","bg3":"#22222e",
+                "border":"#2e2e40","fg":"#e0e0f0","fg2":"#7878a0",
+                "card":"#1e1e2a","entry":"#1e1e2a","sel":"#2a3a2a"}
+    else:
+        return {"bg":"#f2f4f8","bg2":"#ffffff","bg3":"#e8eaf0",
+                "border":"#d0d4e0","fg":"#1a1a2e","fg2":"#606080",
+                "card":"#f8f8fc","entry":"#ffffff","sel":"#d0ecd0"}
+
+# ─── i18n (short version) ──────────────────────────────────────────────────────
+T = {
+"en":{
+    "play":"▶  Play","servers":"🖥  Servers","modrinth":"🌿  Modrinth",
+    "settings":"⚙  Settings","nav_lan":"📡  LAN","instances":"🗂  Instances",
+    "play_title":"Launch Game","mc_ver":"Minecraft Version",
+    "releases":"Releases","snapshots":"Snapshots",
+    "btn_install":"⬇  Install","btn_launch":"▶  Launch",
+    "installed":"Installed versions","log_lbl":"Log",
+    "servers_title":"Local Servers","btn_create_srv":"＋  New Server",
+    "no_servers":"No servers yet. Click «New Server».",
+    "start":"▶ Start","stop":"⏹ Stop","console":"Console",
+    "plugins":"Plugins","delete":"Delete","dashboard":"Dashboard",
+    "modrinth_t":"🌿 Modrinth","search":"Search","all_types":"All",
+    "mods":"Mods","rp":"Resource Packs","shaders":"Shaders",
+    "dp":"Datapacks","mp":"Modpacks","loader_lbl":"Loader:",
+    "hint":"Enter query and press Search",
+    "settings_t":"Settings","username_l":"Player name:","ram_l":"RAM (client):",
+    "jvm_l":"JVM args:","mr_server":"Modrinth Server",
+    "mr_orig":"Original","mr_mirror":"Mirror (RU)",
+    "save_btn":"💾  Save","lang_l":"Language:",
+    "upd_check":"Check updates:","saved":"Settings saved!",
+    "restart_t":"Restart to apply theme/language changes.",
+    "choose_ver":"Choose version","download":"⬇  Download","cancel":"Cancel",
+    "no_files":"No files","err":"Error","warn":"Warning","select_ver":"Select a version",
+    "install_q":"{ver} not installed. Install now?",
+    "java_err":"Java not found!\nhttps://adoptium.net",
+    "closed":"Game closed (code {code})","installing":"Installing {ver}…",
+    "inst_ok":"✓ {ver} installed!","launching":"Launching {ver} as {user}…",
+    "no_jar":"Server jar not found. Recreate server.",
+    "delete_q":"Delete server «{n}» and all files?",
+    "srv_on":"Server {n} is running.","srv_off":"Server {n} is not running.",
+    "plugins_t":"Plugins — {n}",
+    "new_srv":"New Server","srv_name":"Name:","srv_core":"Core:",
+    "srv_ver":"Version:","srv_port":"Port:","srv_ram":"RAM (MB):",
+    "btn_create":"Create & Download Core","creating":"Downloading {core} {ver}…",
+    "srv_ready":"✓ {core} {ver} ready!","name_empty":"Enter a name",
+    "name_exists":"«{n}» already exists","port_invalid":"Port and RAM must be numbers",
+    "upd_title":"Update Available!",
+    "upd_msg":"Version {tag} is available!\n\n{body}\n\nOpen release page?",
+    "upd_no":"No updates found.","checking":"Checking…",
+    "inst_t":"Instances","new_inst":"New Instance","inst_name":"Name:",
+    "inst_ver":"MC Version:","inst_loader":"Loader:","inst_lver":"Loader version:",
+    "btn_new_inst":"＋  New Instance","no_inst":"No instances yet.",
+    "accounts_t":"Accounts","add_ms":"＋ Microsoft","add_ely":"＋ Ely.By",
+    "add_offline":"＋ Offline","no_accounts":"No accounts.",
+    "active_lbl":"Set active","remove_acc":"Remove",
+    "ms_auth_title":"Microsoft Login",
+    "ms_auth_msg":"1. Open: {url}\n2. Enter code: {code}\n\n(Browser opened automatically)",
+    "ely_user":"Username:","ely_pass":"Password:","ely_login":"Login",
+    "offline_name":"Player name:",
+    "java_t":"Java","auto_dl_java":"Auto-download Java 21",
+    "java_dl":"Downloading Java {ver}…","java_ok":"✓ Java {ver} installed!",
+    "java_check":"Check Java","accent_t":"Accent Color","pick_color":"Pick…",
+    "gradient_t":"Animated gradient accent","gradient_en":"Enable gradient",
+    "grad_c1":"Color 1:","grad_c2":"Color 2:",
+    "lan_t":"LAN Servers","lan_searching":"Scanning LAN…",
+    "lan_none":"No LAN servers found.","btn_join":"▶ Join","lan_refresh":"↻ Refresh",
+    "dash_t":"Dashboard — {n}","dash_players":"Online players",
+    "dash_op":"Give OP","dash_ban":"Ban","dash_kick":"Kick","dash_cpu":"RAM usage",
+    "dash_total":"Total joins","send":"Send","inst_label":"Install to instance:",
+},
+"ru":{
+    "play":"▶  Играть","servers":"🖥  Серверы","modrinth":"🌿  Modrinth",
+    "settings":"⚙  Настройки","nav_lan":"📡  LAN","instances":"🗂  Сборки",
+    "play_title":"Запуск игры","mc_ver":"Версия Minecraft",
+    "releases":"Релизы","snapshots":"Снапшоты",
+    "btn_install":"⬇  Установить","btn_launch":"▶  Запустить",
+    "installed":"Установленные версии","log_lbl":"Журнал",
+    "servers_title":"Локальные серверы","btn_create_srv":"＋  Новый сервер",
+    "no_servers":"Нет серверов. Нажмите «Новый сервер».",
+    "start":"▶ Старт","stop":"⏹ Стоп","console":"Консоль",
+    "plugins":"Плагины","delete":"Удалить","dashboard":"Дашборд",
+    "modrinth_t":"🌿 Modrinth","search":"Найти","all_types":"Все",
+    "mods":"Моды","rp":"Ресурспаки","shaders":"Шейдеры",
+    "dp":"Датапаки","mp":"Модпаки","loader_lbl":"Загрузчик:",
+    "hint":"Введите запрос и нажмите Найти",
+    "settings_t":"Настройки","username_l":"Имя игрока:","ram_l":"RAM (клиент):",
+    "jvm_l":"JVM аргументы:","mr_server":"Сервер Modrinth",
+    "mr_orig":"Оригинальный","mr_mirror":"Зеркало РФ",
+    "save_btn":"💾  Сохранить","lang_l":"Язык:",
+    "upd_check":"Проверять обновления:","saved":"Настройки сохранены!",
+    "restart_t":"Перезапустите лаунчер для применения изменений.",
+    "choose_ver":"Выбор версии","download":"⬇  Скачать","cancel":"Отмена",
+    "no_files":"Нет файлов","err":"Ошибка","warn":"Предупреждение",
+    "select_ver":"Выберите версию",
+    "install_q":"{ver} не установлена. Установить?",
+    "java_err":"Java не найдена!\nhttps://adoptium.net",
+    "closed":"Игра закрыта (код {code})","installing":"Установка {ver}…",
+    "inst_ok":"✓ {ver} установлена!","launching":"Запуск {ver} как {user}…",
+    "no_jar":"Jar не найден. Пересоздайте сервер.",
+    "delete_q":"Удалить сервер «{n}» и все файлы?",
+    "srv_on":"Сервер {n} запущен.","srv_off":"Сервер {n} не запущен.",
+    "plugins_t":"Плагины — {n}",
+    "new_srv":"Новый сервер","srv_name":"Название:","srv_core":"Ядро:",
+    "srv_ver":"Версия:","srv_port":"Порт:","srv_ram":"RAM (МБ):",
+    "btn_create":"Создать и скачать ядро","creating":"Скачиваю {core} {ver}…",
+    "srv_ready":"✓ {core} {ver} готов!","name_empty":"Введите название",
+    "name_exists":"«{n}» уже существует","port_invalid":"Порт и RAM — числа",
+    "upd_title":"Доступно обновление!",
+    "upd_msg":"Версия {tag} доступна!\n\n{body}\n\nОткрыть страницу?",
+    "upd_no":"Обновлений нет.","checking":"Проверяю…",
+    "inst_t":"Сборки","new_inst":"Новая сборка","inst_name":"Название:",
+    "inst_ver":"Версия MC:","inst_loader":"Загрузчик:","inst_lver":"Версия загрузчика:",
+    "btn_new_inst":"＋  Новая сборка","no_inst":"Нет сборок.",
+    "accounts_t":"Аккаунты","add_ms":"＋ Microsoft","add_ely":"＋ Ely.By",
+    "add_offline":"＋ Оффлайн","no_accounts":"Нет аккаунтов.",
+    "active_lbl":"Сделать активным","remove_acc":"Удалить",
+    "ms_auth_title":"Вход Microsoft",
+    "ms_auth_msg":"1. Откройте: {url}\n2. Введите код: {code}\n\n(Браузер открыт автоматически)",
+    "ely_user":"Логин:","ely_pass":"Пароль:","ely_login":"Войти",
+    "offline_name":"Имя игрока:",
+    "java_t":"Java","auto_dl_java":"Авто-загрузка Java 21",
+    "java_dl":"Скачиваю Java {ver}…","java_ok":"✓ Java {ver} установлена!",
+    "java_check":"Проверить Java","accent_t":"Цвет акцента","pick_color":"Выбрать…",
+    "gradient_t":"Анимированный градиент акцента","gradient_en":"Включить градиент",
+    "grad_c1":"Цвет 1:","grad_c2":"Цвет 2:",
+    "lan_t":"LAN Серверы","lan_searching":"Поиск LAN серверов…",
+    "lan_none":"LAN серверов не найдено.","btn_join":"▶ Войти","lan_refresh":"↻ Обновить",
+    "dash_t":"Дашборд — {n}","dash_players":"Игроки онлайн",
+    "dash_op":"Дать OP","dash_ban":"Бан","dash_kick":"Кик","dash_cpu":"Потребление RAM",
+    "dash_total":"Всего заходов","send":"Отправить","inst_label":"Установить в сборку:",
+},
+}
 
 def _ver_tuple(s):
-    try:
-        return tuple(int(x) for x in str(s).lstrip("v").split("."))
-    except Exception:
-        return (0,)
+    try: return tuple(int(x) for x in str(s).lstrip("v").split("."))
+    except: return (0,)
 
-def check_for_update():
-    """Returns (latest_tag, release_url, body) or None."""
-    try:
-        data = http_get(GITHUB_API, timeout=8)
-        tag  = data.get("tag_name", "")
-        url  = data.get("html_url", GITHUB_RELEASE_URL)
-        body = data.get("body", "")
-        if _ver_tuple(tag) > _ver_tuple(APP_VERSION):
-            return tag, url, body
-    except Exception:
-        pass
-    return None
+def _lerp_color(c1,c2,t):
+    def h2r(h):
+        h=h.lstrip("#"); return tuple(int(h[i:i+2],16) for i in (0,2,4))
+    r1,g1,b1=h2r(c1); r2,g2,b2=h2r(c2)
+    return "#{:02x}{:02x}{:02x}".format(int(r1+(r2-r1)*t),int(g1+(g2-g1)*t),int(b1+(b2-b1)*t))
 
-# ─── Settings ─────────────────────────────────────────────────────────────────
-DEFAULT_SETTINGS = {
-    "username":        "Player",
-    "ram":             2048,
-    "last_version":    "",
-    "theme":           "dark",
-    "language":        "en",
-    "jvm_args":        "-XX:+UseG1GC -XX:MaxGCPauseMillis=50",
-    "modrinth_server": "original",
-    "check_updates":   True,
-}
-
-MODRINTH_API = {
-    "original":  "https://api.modrinth.com/v2",
-    "mirror_rf": "https://modrinth.black/v2",
-}
-
-def load_settings():
-    if os.path.exists(SETTINGS_F):
+def _load_json(path,default):
+    if os.path.exists(path):
         try:
-            with open(SETTINGS_F, "r", encoding="utf-8") as f:
-                return {**DEFAULT_SETTINGS, **json.load(f)}
-        except Exception:
-            pass
-    return DEFAULT_SETTINGS.copy()
+            with open(path,"r",encoding="utf-8") as f:
+                d=json.load(f)
+                return {**default,**d} if isinstance(default,dict) else d
+        except: pass
+    return default.copy() if isinstance(default,dict) else default
 
-def save_settings(s):
-    with open(SETTINGS_F, "w", encoding="utf-8") as f:
-        json.dump(s, f, indent=2, ensure_ascii=False)
+def _save_json(path,data):
+    with open(path,"w",encoding="utf-8") as f: json.dump(data,f,indent=2,ensure_ascii=False)
 
-def load_servers():
-    if os.path.exists(SERVERS_F):
-        try:
-            with open(SERVERS_F, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-def save_servers(servers):
-    with open(SERVERS_F, "w", encoding="utf-8") as f:
-        json.dump(servers, f, indent=2, ensure_ascii=False)
-
-# ─── i18n ─────────────────────────────────────────────────────────────────────
-STRINGS = {
-    "en": {
-        "app_title":         "MiniLauncher",
-        "nav_play":          "▶  Play",
-        "nav_servers":       "🖥  Servers",
-        "nav_modrinth":      "🌿  Modrinth",
-        "nav_settings":      "⚙  Settings",
-        "theme_toggle":      "🌙 / ☀  Theme",
-        "play_title":        "Launch Game",
-        "mc_version":        "Minecraft version",
-        "releases":          "Releases",
-        "snapshots":         "Snapshots",
-        "btn_install":       "⬇  Install",
-        "btn_launch":        "▶  Launch",
-        "installed_vers":    "Installed versions",
-        "log_title":         "Log",
-        "servers_title":     "Local Servers",
-        "btn_create_server": "＋  Create Server",
-        "no_servers":        "No servers yet. Click «Create Server».",
-        "btn_start":         "▶ Start",
-        "btn_stop":          "⏹ Stop",
-        "btn_console":       "Console",
-        "btn_plugins":       "Plugins",
-        "btn_delete":        "Delete",
-        "modrinth_title":    "🌿 Modrinth",
-        "search_hint":       "Search...",
-        "btn_search":        "Search",
-        "type_all":          "All types",
-        "type_mod":          "Mods",
-        "type_rp":           "Resource Packs",
-        "type_shader":       "Shaders",
-        "type_dp":           "Datapacks",
-        "type_mp":           "Modpacks",
-        "loader_label":      "  Loader:",
-        "status_hint":       "Enter query and press Search",
-        "settings_title":    "Settings",
-        "username_lbl":      "Player name:",
-        "ram_lbl":           "RAM (client):",
-        "jvm_lbl":           "JVM args:",
-        "modrinth_server_lbl": "Modrinth server",
-        "mr_original":       "Original",
-        "mr_mirror":         "Mirror (RU)",
-        "mc_folder":         "Minecraft folder:",
-        "srv_folder":        "Servers folder:",
-        "btn_save":          "💾  Save settings",
-        "lang_lbl":          "Language:",
-        "update_check_lbl":  "Check for updates:",
-        "saved_ok":          "Settings saved!",
-        "restart_theme":     "Theme changed!\nRestart the launcher to apply.",
-        "restart_lang":      "Language changed!\nRestart the launcher to apply.",
-        "choose_ver":        "Choose version",
-        "btn_download":      "⬇  Download",
-        "btn_cancel":        "Cancel",
-        "downloaded_title":  "Downloaded!",
-        "no_files":          "No files available",
-        "err_title":         "Error",
-        "warn_title":        "Warning",
-        "select_version":    "Select a version",
-        "install_prompt":    "{ver} is not installed. Install now?",
-        "java_not_found":    "Java not found!\nInstall Java 21:\nhttps://adoptium.net",
-        "game_closed":       "Game closed (code {code})",
-        "installing":        "Installing {ver}...",
-        "installed_ok":      "✓ {ver} installed!",
-        "launching":         "Launching {ver} as {user} ({ram} MB)...",
-        "no_jar":            "Server jar not found. Recreate the server.",
-        "delete_confirm":    "Delete server «{name}» and all its files?",
-        "srv_running":       "Server {name} is running. Type commands below.",
-        "srv_stopped":       "Server {name} is not running.",
-        "plugins_title":     "Plugins — {name}",
-        "plugin_downloaded": "Plugin saved to:\n{path}",
-        "new_server":        "New Server",
-        "srv_name":          "Name:",
-        "srv_core":          "Core:",
-        "srv_version":       "Version:",
-        "srv_port":          "Port:",
-        "srv_ram":           "RAM (MB):",
-        "btn_create":        "Create & Download Core",
-        "folder_created":    "Folder created. Downloading {core} {ver}...",
-        "srv_ready":         "✓ {core} {ver} ready!",
-        "name_empty":        "Enter server name",
-        "name_exists":       "Server «{name}» already exists",
-        "port_ram_invalid":  "Port and RAM must be numbers",
-        "update_title":      "Update Available!",
-        "update_msg":        "New version {tag} is available!\n\nChanges:\n{body}\n\nOpen release page?",
-        "update_no":         "No updates found.",
-        "checking_update":   "Checking for updates...",
-        "ver_filter_all":    "All",
-    },
-    "ru": {
-        "app_title":         "MiniLauncher",
-        "nav_play":          "▶  Играть",
-        "nav_servers":       "🖥  Серверы",
-        "nav_modrinth":      "🌿  Modrinth",
-        "nav_settings":      "⚙  Настройки",
-        "theme_toggle":      "🌙 / ☀  Тема",
-        "play_title":        "Запуск игры",
-        "mc_version":        "Версия Minecraft",
-        "releases":          "Релизы",
-        "snapshots":         "Снапшоты",
-        "btn_install":       "⬇  Установить",
-        "btn_launch":        "▶  Запустить",
-        "installed_vers":    "Установленные версии",
-        "log_title":         "Журнал",
-        "servers_title":     "Локальные серверы",
-        "btn_create_server": "＋  Создать сервер",
-        "no_servers":        "Нет серверов. Нажмите «Создать сервер».",
-        "btn_start":         "▶ Старт",
-        "btn_stop":          "⏹ Стоп",
-        "btn_console":       "Консоль",
-        "btn_plugins":       "Плагины",
-        "btn_delete":        "Удалить",
-        "modrinth_title":    "🌿 Modrinth",
-        "search_hint":       "Поиск...",
-        "btn_search":        "Найти",
-        "type_all":          "Все типы",
-        "type_mod":          "Моды",
-        "type_rp":           "Ресурспаки",
-        "type_shader":       "Шейдеры",
-        "type_dp":           "Датапаки",
-        "type_mp":           "Модпаки",
-        "loader_label":      "  Загрузчик:",
-        "status_hint":       "Введите запрос и нажмите Найти",
-        "settings_title":    "Настройки",
-        "username_lbl":      "Имя игрока:",
-        "ram_lbl":           "RAM (клиент):",
-        "jvm_lbl":           "JVM аргументы:",
-        "modrinth_server_lbl": "Сервер Modrinth",
-        "mr_original":       "Оригинальный",
-        "mr_mirror":         "Зеркало для РФ",
-        "mc_folder":         "Папка Minecraft:",
-        "srv_folder":        "Папка серверов:",
-        "btn_save":          "💾  Сохранить настройки",
-        "lang_lbl":          "Язык:",
-        "update_check_lbl":  "Проверять обновления:",
-        "saved_ok":          "Настройки сохранены!",
-        "restart_theme":     "Тема изменена!\nПерезапустите лаунчер.",
-        "restart_lang":      "Язык изменён!\nПерезапустите лаунчер.",
-        "choose_ver":        "Выбор версии",
-        "btn_download":      "⬇  Скачать",
-        "btn_cancel":        "Отмена",
-        "downloaded_title":  "Скачано!",
-        "no_files":          "Нет доступных файлов",
-        "err_title":         "Ошибка",
-        "warn_title":        "Предупреждение",
-        "select_version":    "Выберите версию",
-        "install_prompt":    "{ver} не установлена. Установить сейчас?",
-        "java_not_found":    "Java не найдена!\nУстановите Java 21:\nhttps://adoptium.net",
-        "game_closed":       "Игра завершена (код {code})",
-        "installing":        "Установка {ver}...",
-        "installed_ok":      "✓ {ver} установлена!",
-        "launching":         "Запуск {ver} как {user} ({ram} МБ)...",
-        "no_jar":            "Jar файл не найден. Пересоздайте сервер.",
-        "delete_confirm":    "Удалить сервер «{name}» и все его файлы?",
-        "srv_running":       "Сервер {name} запущен. Введите команду.",
-        "srv_stopped":       "Сервер {name} не запущен.",
-        "plugins_title":     "Плагины — {name}",
-        "plugin_downloaded": "Плагин сохранён в:\n{path}",
-        "new_server":        "Новый сервер",
-        "srv_name":          "Название:",
-        "srv_core":          "Ядро:",
-        "srv_version":       "Версия:",
-        "srv_port":          "Порт:",
-        "srv_ram":           "RAM (МБ):",
-        "btn_create":        "Создать и скачать ядро",
-        "folder_created":    "Папка создана. Скачиваю {core} {ver}...",
-        "srv_ready":         "✓ {core} {ver} готов к запуску!",
-        "name_empty":        "Введите название сервера",
-        "name_exists":       "Сервер «{name}» уже существует",
-        "port_ram_invalid":  "Порт и RAM должны быть числами",
-        "update_title":      "Доступно обновление!",
-        "update_msg":        "Доступна новая версия {tag}!\n\nИзменения:\n{body}\n\nОткрыть страницу релиза?",
-        "update_no":         "Обновлений не найдено.",
-        "checking_update":   "Проверка обновлений...",
-        "ver_filter_all":    "Все",
-    },
+DEFAULT_SETTINGS={
+    "username":"Player","ram":2048,"last_version":"","theme":"dark",
+    "language":"en","jvm_args":"-XX:+UseG1GC -XX:MaxGCPauseMillis=50",
+    "modrinth_server":"original","check_updates":True,
+    "accent_color":"#5dbb63","gradient_theme":False,
+    "gradient_colors":["#5dbb63","#3a8fd9"],
+    "active_account":None,
 }
 
-# ─── Themes ───────────────────────────────────────────────────────────────────
-THEMES = {
-    "dark": {
-        "bg":     "#1a1a24",
-        "bg2":    "#13131a",
-        "bg3":    "#22222e",
-        "border": "#2e2e40",
-        "fg":     "#e0e0f0",
-        "fg2":    "#7878a0",
-        "acc":    "#5dbb63",
-        "acc_h":  "#4ea854",
-        "btn_fg": "#ffffff",
-        "entry":  "#1e1e2a",
-        "sel":    "#2a3a2a",
-        "card":   "#1e1e2a",
-    },
-    "light": {
-        "bg":     "#f2f2f6",
-        "bg2":    "#ffffff",
-        "bg3":    "#e6e6f0",
-        "border": "#ccccdd",
-        "fg":     "#1a1a2e",
-        "fg2":    "#606080",
-        "acc":    "#3a9e42",
-        "acc_h":  "#2d8835",
-        "btn_fg": "#ffffff",
-        "entry":  "#ffffff",
-        "sel":    "#d0ecd0",
-        "card":   "#f8f8fc",
-    },
-}
+# ══════════════════════════════════════════════════════════════════════════════
+#  Reusable CTk widgets
+# ══════════════════════════════════════════════════════════════════════════════
+def CTkCard(parent, **kw):
+    """Rounded frame used as a card."""
+    p = _pal()
+    return ctk.CTkFrame(parent, corner_radius=10,
+                        fg_color=p["card"],
+                        border_width=1, border_color=p["border"], **kw)
 
-# ─── Modrinth content types ───────────────────────────────────────────────────
-STRIPE_COLORS = {
-    "mod":          "#5dbb63",
-    "resourcepack": "#5090e0",
-    "shader":       "#e0a830",
-    "datapack":     "#c060e0",
-    "modpack":      "#e05050",
-}
-TYPE_LABELS_EN = {
-    "mod": "MOD", "resourcepack": "RESOURCE PACK",
-    "shader": "SHADER", "datapack": "DATAPACK", "modpack": "MODPACK",
-}
-TYPE_LABELS_RU = {
-    "mod": "МОД", "resourcepack": "РЕСУРСПАК",
-    "shader": "ШЕЙДЕР", "datapack": "ДАТАПАК", "modpack": "МОДПАК",
-}
+def CTkSep(parent):
+    p=_pal()
+    ctk.CTkFrame(parent,height=1,fg_color=p["border"],corner_radius=0).pack(fill="x",pady=8)
 
-STATUS_COLORS = {
-    "offline":   "#e05050",
-    "online":    "#5dbb63",
-    "starting":  "#e0a830",
-    "stopping":  "#e07040",
-}
+def CTkScrollFrame2(parent, **kw):
+    """Alias with lighter colour."""
+    p=_pal()
+    return ctk.CTkScrollableFrame(parent, fg_color=p["bg"], **kw)
 
-# ─── Server cores ─────────────────────────────────────────────────────────────
-# Common MC versions list used by all cores
-ALL_MC_VERSIONS = [
-    "1.21.4","1.21.3","1.21.1","1.21",
-    "1.20.6","1.20.4","1.20.2","1.20.1","1.20",
-    "1.19.4","1.19.3","1.19.2","1.19.1","1.19",
-    "1.18.2","1.18.1","1.18",
-    "1.17.1","1.17",
-    "1.16.5","1.16.4","1.16.3","1.16.2","1.16.1",
-    "1.15.2","1.15.1","1.15",
-    "1.14.4","1.14.3","1.14.2","1.14.1","1.14",
-    "1.13.2","1.13.1","1.13",
-    "1.12.2","1.12.1","1.12",
-    "1.11.2","1.11",
-    "1.10.2","1.10",
-    "1.9.4","1.9",
-    "1.8.9","1.8.8","1.8",
-]
-
-SERVER_CORES = {
-    # ── PaperMC family ──────────────────────────────────────────────────────
-    "Paper": {
-        "desc_en": "High-performance Spigot fork. Recommended for most servers.",
-        "desc_ru": "Высокопроизводительный форк Spigot. Рекомендуется.",
-        "color":   "#3a8fd9",
-        "versions": ["1.21.4","1.21.3","1.21.1","1.20.6","1.20.4","1.20.2",
-                     "1.20.1","1.19.4","1.19.3","1.19.2","1.18.2","1.17.1",
-                     "1.16.5","1.15.2","1.14.4","1.13.2","1.12.2"],
-    },
-    "Purpur": {
-        "desc_en": "Paper fork with extra gameplay config options.",
-        "desc_ru": "Форк Paper с расширенными настройками игрового процесса.",
-        "color":   "#9b59b6",
-        "versions": ["1.21.4","1.21.3","1.21.1","1.20.6","1.20.4","1.20.1",
-                     "1.19.4","1.18.2","1.17.1","1.16.5"],
-    },
-    "Pufferfish": {
-        "desc_en": "Optimized Paper fork focused on performance for large servers.",
-        "desc_ru": "Оптимизированный форк Paper для больших серверов.",
-        "color":   "#e07830",
-        "versions": ["1.21.4","1.21.1","1.20.4","1.20.1","1.19.4","1.18.2"],
-    },
-    "Folia": {
-        "desc_en": "Paper fork with regionized multithreading for large servers.",
-        "desc_ru": "Форк Paper с многопоточностью по регионам (для больших серверов).",
-        "color":   "#20a0a0",
-        "versions": ["1.21.4","1.21.1","1.20.4","1.20.1"],
-    },
-    # ── Spigot family ───────────────────────────────────────────────────────
-    "Spigot": {
-        "desc_en": "Classic Spigot server. Plugin-compatible.",
-        "desc_ru": "Классический Spigot. Совместим с большинством плагинов.",
-        "color":   "#e0a020",
-        "versions": ["1.21.4","1.21.1","1.20.6","1.20.4","1.20.1",
-                     "1.19.4","1.18.2","1.17.1","1.16.5","1.15.2",
-                     "1.14.4","1.12.2","1.8.9"],
-    },
-    "CraftBukkit": {
-        "desc_en": "The original Bukkit server (Spigot build).",
-        "desc_ru": "Оригинальный CraftBukkit (сборка Spigot).",
-        "color":   "#c08020",
-        "versions": ["1.21.4","1.20.1","1.19.4","1.18.2","1.16.5","1.12.2","1.8.9"],
-    },
-    # ── Mod loaders ─────────────────────────────────────────────────────────
-    "Fabric": {
-        "desc_en": "Lightweight mod loader server. Great for client mods.",
-        "desc_ru": "Лёгкий сервер на Fabric. Отлично для клиентских модов.",
-        "color":   "#d4a017",
-        "versions": ["1.21.4","1.21.3","1.21.1","1.21","1.20.6","1.20.4",
-                     "1.20.2","1.20.1","1.19.4","1.18.2","1.17.1","1.16.5"],
-    },
-    "Forge": {
-        "desc_en": "Forge mod loader server. Required for most Forge mods.",
-        "desc_ru": "Сервер с загрузчиком Forge. Нужен для большинства Forge-модов.",
-        "color":   "#8060c0",
-        "versions": ["1.21.4","1.21.1","1.20.6","1.20.4","1.20.1",
-                     "1.19.4","1.18.2","1.17.1","1.16.5","1.15.2",
-                     "1.14.4","1.12.2","1.7.10"],
-    },
-    "NeoForge": {
-        "desc_en": "Community fork of Forge with modern improvements.",
-        "desc_ru": "Форк Forge с улучшениями от сообщества.",
-        "color":   "#e05820",
-        "versions": ["1.21.4","1.21.3","1.21.1","1.21","1.20.6","1.20.4","1.20.2","1.20.1"],
-    },
-    "Quilt": {
-        "desc_en": "Fork of Fabric with additional modding features.",
-        "desc_ru": "Форк Fabric с дополнительными возможностями для моддинга.",
-        "color":   "#7040c0",
-        "versions": ["1.21.4","1.21.1","1.20.6","1.20.4","1.20.1","1.19.4","1.18.2"],
-    },
-    # ── Hybrid (plugins + mods) ─────────────────────────────────────────────
-    "Mohist": {
-        "desc_en": "Hybrid: Forge mods + Bukkit/Spigot plugins on one server.",
-        "desc_ru": "Гибрид: Forge-моды + Bukkit/Spigot-плагины на одном сервере.",
-        "color":   "#d04060",
-        "versions": ["1.21.1","1.20.1","1.19.4","1.18.2","1.16.5","1.12.2"],
-    },
-    "Arclight": {
-        "desc_en": "Hybrid: Forge + Paper plugins. Stable hybrid option.",
-        "desc_ru": "Гибрид: Forge + Paper-плагины. Стабильный гибридный вариант.",
-        "color":   "#c030a0",
-        "versions": ["1.21.1","1.20.1","1.19.4","1.18.2","1.16.5"],
-    },
-    "Ketting": {
-        "desc_en": "Hybrid: NeoForge/Forge + Paper. Actively developed.",
-        "desc_ru": "Гибрид: NeoForge/Forge + Paper. Активно развивается.",
-        "color":   "#a050e0",
-        "versions": ["1.21.1","1.20.4","1.20.1"],
-    },
-    # ── Proxy ───────────────────────────────────────────────────────────────
-    "Velocity": {
-        "desc_en": "Modern high-performance proxy server (replaces BungeeCord).",
-        "desc_ru": "Современный высокопроизводительный прокси (замена BungeeCord).",
-        "color":   "#20b0e0",
-        "versions": ["latest"],
-    },
-    "BungeeCord": {
-        "desc_en": "Classic proxy server for multi-server networks.",
-        "desc_ru": "Классический прокси для мультисерверных сетей.",
-        "color":   "#60a0e0",
-        "versions": ["latest"],
-    },
-    "Waterfall": {
-        "desc_en": "PaperMC fork of BungeeCord with extra features.",
-        "desc_ru": "Форк BungeeCord от PaperMC с улучшениями.",
-        "color":   "#4080d0",
-        "versions": ["latest"],
-    },
-    # ── Vanilla ─────────────────────────────────────────────────────────────
-    "Vanilla": {
-        "desc_en": "Official Mojang server. No plugins or mods.",
-        "desc_ru": "Официальный сервер Mojang без плагинов и модов.",
-        "color":   "#5dbb63",
-        "versions": ["1.21.4","1.21.3","1.21.1","1.20.6","1.20.4","1.20.1",
-                     "1.19.4","1.18.2","1.17.1","1.16.5","1.15.2",
-                     "1.14.4","1.13.2","1.12.2"],
-    },
-    "Geyser": {
-        "desc_en": "Bedrock → Java bridge. Allows Bedrock clients to join Java servers.",
-        "desc_ru": "Мост Bedrock → Java. Позволяет Bedrock-клиентам подключаться к Java-серверам.",
-        "color":   "#30b080",
-        "versions": ["latest"],
-    },
-}
-
-# Cores that have a real API downloader
-DOWNLOADABLE_CORES = {
-    "Paper", "Purpur", "Velocity", "Waterfall", "Fabric", "Vanilla", "BungeeCord"
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Application
-# ─────────────────────────────────────────────────────────────────────────────
-class MiniLauncher(tk.Tk):
+# ══════════════════════════════════════════════════════════════════════════════
+#  App
+# ══════════════════════════════════════════════════════════════════════════════
+class MiniLauncher(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.settings            = load_settings()
-        self.t                   = THEMES[self.settings["theme"]]
-        self._lang               = self.settings.get("language", "en")
-        self.mc_versions         = []
-        self.installed_versions  = []
-        self.servers             = load_servers()
-        self.server_processes    = {}   # name → Popen
+        self.settings  = _load_json(SETTINGS_F, DEFAULT_SETTINGS)
+        self.accounts  = _load_json(ACCOUNTS_F, []) if os.path.exists(ACCOUNTS_F) else []
+        self.servers   = _load_json(SERVERS_F,  []) if os.path.exists(SERVERS_F)  else []
+        self.instances = _load_json(INSTANCES_F,[]) if os.path.exists(INSTANCES_F) else []
+        self._lang     = self.settings.get("language","en")
+
+        # set ctk appearance BEFORE building UI
+        theme = self.settings.get("theme","dark")
+        ctk.set_appearance_mode("dark" if theme in ("dark","midnight","forest","ocean") else "light")
+
+        self.mc_versions        = []
+        self.installed_versions = []
+        self.server_processes   = {}
+        self._srv_join_counts   = {}
+        self._update_info       = None
+        self._java_path         = None
+        self._skin_photo        = None
+        self._grad_t            = 0.0
+        self._accent            = self.settings.get("accent_color","#5dbb63")
 
         self.title(f"MiniLauncher  v{APP_VERSION}")
-        self.geometry("960x610")
-        self.minsize(800, 520)
-        self.configure(bg=self.t["bg2"])
-        self.resizable(True, True)
+        self.geometry("1040x660")
+        self.minsize(860,560)
 
         self._build_ui()
         self._load_versions_async()
+        self._find_java_async()
+        if self.settings.get("check_updates",True):
+            threading.Thread(target=self._bg_update_check,daemon=True).start()
+        if self.settings.get("gradient_theme",False):
+            self.after(200,self._anim_gradient)
 
-        # Check for updates in background
-        if self.settings.get("check_updates", True):
-            threading.Thread(target=self._bg_update_check, daemon=True).start()
-
-    def _(self, key, **kw):
-        """Translate a string key using current language."""
-        lang = self._lang if self._lang in STRINGS else "en"
-        s = STRINGS[lang].get(key, STRINGS["en"].get(key, key))
+    # ── translate ─────────────────────────────────────────────────────────
+    def _(self,key,**kw):
+        lang=self._lang if self._lang in T else "en"
+        s=T[lang].get(key,T["en"].get(key,key))
         return s.format(**kw) if kw else s
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Sidebar + layout
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    #  MAIN LAYOUT
+    # ══════════════════════════════════════════════════════════════════════
     def _build_ui(self):
-        t = self.t
+        p=_pal(); acc=self._accent
 
-        self.sidebar = tk.Frame(self, bg=t["bg2"], width=162)
-        self.sidebar.pack(side="left", fill="y")
-        self.sidebar.pack_propagate(False)
+        self.grid_columnconfigure(1,weight=1)
+        self.grid_rowconfigure(0,weight=1)
 
-        # Logo + version
-        logo_f = tk.Frame(self.sidebar, bg=t["bg2"])
-        logo_f.pack(fill="x", padx=14, pady=(14, 2))
-        tk.Label(logo_f, text="⛏ MiniLauncher",
-                 bg=t["bg2"], fg=t["acc"],
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        tk.Label(logo_f, text=f"v{APP_VERSION}",
-                 bg=t["bg2"], fg=t["fg2"],
-                 font=("Segoe UI", 8)).pack(anchor="w")
+        # ── Sidebar ──────────────────────────────────────────────────────
+        self.sidebar=ctk.CTkFrame(self,width=180,corner_radius=0,
+                                  fg_color=p["bg2"])
+        self.sidebar.grid(row=0,column=0,sticky="nsew")
+        self.sidebar.grid_rowconfigure(10,weight=1)
+        self.sidebar.grid_propagate(False)
 
-        tk.Frame(self.sidebar, bg=t["border"], height=1).pack(fill="x", padx=8, pady=(6, 4))
+        # Logo
+        logo_f=ctk.CTkFrame(self.sidebar,fg_color="transparent")
+        logo_f.grid(row=0,column=0,sticky="ew",padx=14,pady=(16,4))
+        logo_btn=ctk.CTkButton(logo_f,text="⛏ MiniLauncher",
+                               font=ctk.CTkFont(size=14,weight="bold"),
+                               fg_color="transparent",text_color=acc,
+                               hover_color=p["bg3"],anchor="w",corner_radius=6,
+                               command=lambda:webbrowser.open(GITHUB_URL))
+        logo_btn.pack(fill="x")
+        ctk.CTkLabel(logo_f,text=f"v{APP_VERSION}",
+                     font=ctk.CTkFont(size=10),text_color=p["fg2"]).pack(anchor="w")
+        self._logo_btn=logo_btn
 
-        self.nav_btns = {}
-        for key, lkey in [("play",     "nav_play"),
-                           ("servers",  "nav_servers"),
-                           ("modrinth", "nav_modrinth"),
-                           ("settings", "nav_settings")]:
-            btn = tk.Button(
-                self.sidebar, text=self._(lkey), anchor="w",
-                bg=t["bg2"], fg=t["fg2"], relief="flat",
-                font=("Segoe UI", 10), padx=14, pady=9,
-                cursor="hand2", bd=0,
-                activebackground=t["bg3"], activeforeground=t["fg"],
-                command=lambda k=key: self._show_tab(k),
-            )
-            btn.pack(fill="x", padx=6, pady=2)
-            self.nav_btns[key] = btn
+        ctk.CTkFrame(self.sidebar,height=1,fg_color=p["border"],corner_radius=0
+                     ).grid(row=1,column=0,sticky="ew",padx=10,pady=(4,6))
 
-        # Bottom: update button (hidden until update found) + theme
-        tk.Frame(self.sidebar, bg=t["border"], height=1).pack(
-            fill="x", padx=8, side="bottom", pady=(0, 4))
-        tk.Button(
-            self.sidebar, text=self._("theme_toggle"),
-            bg=t["bg2"], fg=t["fg2"], relief="flat",
-            font=("Segoe UI", 9), padx=14, pady=6,
-            cursor="hand2", bd=0, activebackground=t["bg3"],
-            command=self._toggle_theme, anchor="w",
-        ).pack(fill="x", padx=6, pady=(0, 6), side="bottom")
+        # Account widget
+        self.acc_frame=ctk.CTkFrame(self.sidebar,fg_color="transparent")
+        self.acc_frame.grid(row=2,column=0,sticky="ew",padx=8,pady=(0,4))
+        self._build_account_widget()
 
-        self.update_btn = tk.Button(
-            self.sidebar, text="🔔  Update available!",
-            bg="#e0a020", fg="#1a1000", relief="flat",
-            font=("Segoe UI", 9, "bold"), padx=14, pady=6,
-            cursor="hand2", bd=0,
-            activebackground="#c08010",
-            command=self._open_update_page,
-            anchor="w",
-        )
-        # shown only when update found
+        ctk.CTkFrame(self.sidebar,height=1,fg_color=p["border"],corner_radius=0
+                     ).grid(row=3,column=0,sticky="ew",padx=10,pady=(0,6))
 
-        self.content = tk.Frame(self, bg=t["bg"])
-        self.content.pack(side="left", fill="both", expand=True)
+        # Nav buttons
+        self.nav_btns={}
+        tabs=[("play","play"),("instances","instances"),("servers","servers"),
+              ("modrinth","modrinth"),("lan","nav_lan"),("settings","settings")]
+        for row_i,(key,lk) in enumerate(tabs,start=4):
+            btn=ctk.CTkButton(self.sidebar,text=self._(lk),anchor="w",
+                              font=ctk.CTkFont(size=13),corner_radius=8,
+                              fg_color="transparent",text_color=p["fg2"],
+                              hover_color=p["bg3"],
+                              command=lambda k=key:self._show_tab(k))
+            btn.grid(row=row_i,column=0,sticky="ew",padx=8,pady=2)
+            self.nav_btns[key]=btn
 
-        self.pages = {
-            "play":     self._build_play_page(),
-            "servers":  self._build_servers_page(),
-            "modrinth": self._build_modrinth_page(),
-            "settings": self._build_settings_page(),
-        }
+        # Bottom: theme toggle
+        ctk.CTkFrame(self.sidebar,height=1,fg_color=p["border"],corner_radius=0
+                     ).grid(row=11,column=0,sticky="ew",padx=10,pady=(0,4))
+        ctk.CTkButton(self.sidebar,text="🌙 / ☀  Theme",anchor="w",
+                      font=ctk.CTkFont(size=11),corner_radius=8,
+                      fg_color="transparent",text_color=p["fg2"],
+                      hover_color=p["bg3"],
+                      command=self._toggle_theme
+                      ).grid(row=12,column=0,sticky="ew",padx=8,pady=(0,10))
+
+        # Update banner (hidden by default)
+        self.update_banner=ctk.CTkButton(self.sidebar,text="🔔  Update available!",
+                                         fg_color="#e0a020",text_color="#1a1000",
+                                         hover_color="#c08010",corner_radius=8,
+                                         font=ctk.CTkFont(size=11,weight="bold"),
+                                         command=self._open_update_page)
+
+        # ── Content area ──────────────────────────────────────────────────
+        self.content=ctk.CTkFrame(self,corner_radius=0,fg_color=p["bg"])
+        self.content.grid(row=0,column=1,sticky="nsew")
+        self.content.grid_columnconfigure(0,weight=1)
+        self.content.grid_rowconfigure(0,weight=1)
+
+        self.pages={}
+        self.pages["play"]      = self._build_play_page()
+        self.pages["instances"] = self._build_instances_page()
+        self.pages["servers"]   = self._build_servers_page()
+        self.pages["modrinth"]  = self._build_modrinth_page()
+        self.pages["lan"]       = self._build_lan_page()
+        self.pages["settings"]  = self._build_settings_page()
+
         self._show_tab("play")
 
-    def _show_tab(self, key):
-        t = self.t
-        for frame in self.pages.values():
-            frame.pack_forget()
-        self.pages[key].pack(fill="both", expand=True)
-        for k, btn in self.nav_btns.items():
-            if k == key:
-                btn.configure(bg=t["bg3"], fg=t["acc"],
-                               font=("Segoe UI", 10, "bold"))
+    def _show_tab(self,key):
+        p=_pal(); acc=self._accent
+        for k,f in self.pages.items():
+            f.grid_forget()
+        self.pages[key].grid(row=0,column=0,sticky="nsew")
+        for k,b in self.nav_btns.items():
+            if k==key:
+                b.configure(fg_color=p["bg3"],text_color=acc,
+                            font=ctk.CTkFont(size=13,weight="bold"))
             else:
-                btn.configure(bg=t["bg2"], fg=t["fg2"],
-                               font=("Segoe UI", 10))
-        if key == "servers":
-            self._srv_refresh_list()
+                b.configure(fg_color="transparent",text_color=p["fg2"],
+                            font=ctk.CTkFont(size=13))
+        if key=="servers":  self._srv_refresh_list()
+        if key=="lan":      threading.Thread(target=self._lan_scan,daemon=True).start()
+        if key=="modrinth": self._mr_auto_search()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Auto-update check
-    # ══════════════════════════════════════════════════════════════════════════
-    def _bg_update_check(self):
-        result = check_for_update()
-        if result:
-            tag, url, body = result
-            self._update_tag = tag
-            self._update_url = url
-            self._update_body = body
-            self.after(0, self._show_update_banner)
+    # ══════════════════════════════════════════════════════════════════════
+    #  ACCOUNT WIDGET (sidebar)
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_account_widget(self):
+        for w in self.acc_frame.winfo_children(): w.destroy()
+        p=_pal(); acc=self._get_active_account()
+        row=ctk.CTkFrame(self.acc_frame,fg_color="transparent")
+        row.pack(fill="x")
 
-    def _show_update_banner(self):
-        self.update_btn.pack(fill="x", padx=6, pady=(0, 4), side="bottom",
-                             before=self.sidebar.winfo_children()[-2])
+        self.skin_lbl=ctk.CTkLabel(row,text="",width=32,height=32)
+        self.skin_lbl.pack(side="left",padx=(2,8))
 
-    def _open_update_page(self):
-        tag  = getattr(self, "_update_tag", "")
-        url  = getattr(self, "_update_url", GITHUB_RELEASE_URL)
-        body = getattr(self, "_update_body", "")
-        msg  = self._("update_msg", tag=tag,
-                       body=body[:400] + ("…" if len(body) > 400 else ""))
-        if messagebox.askyesno(self._("update_title"), msg):
-            webbrowser.open(url)
+        info=ctk.CTkFrame(row,fg_color="transparent")
+        info.pack(side="left",fill="x",expand=True)
+        name  = acc["username"] if acc else "No account"
+        atype = acc.get("type","offline").upper() if acc else "OFFLINE"
+        ctk.CTkLabel(info,text=name,font=ctk.CTkFont(size=11,weight="bold"),
+                     anchor="w").pack(anchor="w")
+        ctk.CTkLabel(info,text=atype,font=ctk.CTkFont(size=9),
+                     text_color=self._accent,anchor="w").pack(anchor="w")
 
-    def _manual_update_check(self):
-        self._set_update_status(self._("checking_update"))
-        def _do():
-            result = check_for_update()
-            if result:
-                tag, url, body = result
-                self._update_tag  = tag
-                self._update_url  = url
-                self._update_body = body
-                self.after(0, self._show_update_banner)
-                self.after(0, self._open_update_page)
-            else:
-                self.after(0, lambda: self._set_update_status(self._("update_no")))
-        threading.Thread(target=_do, daemon=True).start()
+        ctk.CTkButton(row,text="👤",width=32,height=32,corner_radius=8,
+                      fg_color="transparent",hover_color=p["bg3"],
+                      font=ctk.CTkFont(size=14),
+                      command=self._open_account_manager).pack(side="right",padx=4)
 
-    def _set_update_status(self, msg):
+        if acc and PIL_OK:
+            threading.Thread(target=self._load_skin,args=(acc,),daemon=True).start()
+
+    def _get_active_account(self):
+        aid=self.settings.get("active_account")
+        if aid:
+            a=next((a for a in self.accounts if a.get("id")==aid),None)
+            if a: return a
+        return self.accounts[0] if self.accounts else None
+
+    def _load_skin(self,account):
         try:
-            self.update_status_lbl.configure(text=msg)
-        except Exception:
-            pass
+            atype=account.get("type","offline"); username=account.get("username","")
+            if atype=="ely":
+                raw=http_get_bytes(ELY_SKIN_URL.format(username=username),timeout=6)
+            elif atype=="microsoft":
+                uid=account.get("uuid","").replace("-","")
+                if not uid: return
+                prof=http_get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uid}",timeout=6)
+                import base64
+                prop=next((p for p in prof.get("properties",[]) if p["name"]=="textures"),None)
+                if not prop: return
+                tex=json.loads(base64.b64decode(prop["value"]).decode())
+                url=tex.get("textures",{}).get("SKIN",{}).get("url","")
+                if not url: return
+                raw=http_get_bytes(url,timeout=6)
+            else:
+                raw=http_get_bytes(f"https://minotar.net/helm/{username}/32.png",timeout=6)
+            img=Image.open(BytesIO(raw)).convert("RGBA")
+            if atype!="offline":
+                face=img.crop((8,8,16,16)).resize((32,32),Image.NEAREST)
+                if img.width>=64 and img.height>=64:
+                    ov=img.crop((40,8,48,16)).resize((32,32),Image.NEAREST)
+                    face=Image.alpha_composite(face,ov)
+                mask=Image.new("L",(32,32),0)
+                ImageDraw.Draw(mask).rounded_rectangle([0,0,31,31],radius=6,fill=255)
+                face.putalpha(mask)
+            else:
+                face=img.resize((32,32),Image.NEAREST)
+            self._skin_photo=ctk.CTkImage(face,size=(32,32))
+            self.after(0,lambda:self.skin_lbl.configure(image=self._skin_photo,text=""))
+        except: pass
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Play page
-    # ══════════════════════════════════════════════════════════════════════════
+    def _open_account_manager(self):
+        p=_pal()
+        win=ctk.CTkToplevel(self)
+        win.title(self._("accounts_t")); win.geometry("540x460"); win.grab_set()
+
+        ctk.CTkLabel(win,text=self._("accounts_t"),
+                     font=ctk.CTkFont(size=16,weight="bold")).pack(pady=(16,8))
+
+        lf=CTkScrollFrame2(win); lf.pack(fill="both",expand=True,padx=16,pady=(0,8))
+
+        def refresh():
+            for w in lf.winfo_children(): w.destroy()
+            if not self.accounts:
+                ctk.CTkLabel(lf,text=self._("no_accounts"),
+                             text_color=p["fg2"]).pack(pady=20); return
+            for acc in self.accounts:
+                is_active=(acc.get("id")==self.settings.get("active_account"))
+                card=CTkCard(lf); card.pack(fill="x",pady=4)
+                left=ctk.CTkFrame(card,fg_color="transparent")
+                left.pack(side="left",fill="both",expand=True,padx=12,pady=8)
+                ctk.CTkLabel(left,text=acc.get("username","?"),
+                             font=ctk.CTkFont(size=12,weight="bold" if is_active else "normal"),
+                             text_color=self._accent if is_active else p["fg"]).pack(anchor="w")
+                ctk.CTkLabel(left,text=acc.get("type","offline").upper(),
+                             font=ctk.CTkFont(size=10),text_color=p["fg2"]).pack(anchor="w")
+                right=ctk.CTkFrame(card,fg_color="transparent")
+                right.pack(side="right",padx=8,pady=6)
+                if not is_active:
+                    self._btn(right,self._("active_lbl"),
+                              lambda a=acc:(_set_active(a),refresh()),"acc").pack(pady=2)
+                self._btn(right,self._("remove_acc"),
+                          lambda a=acc:(_remove(a),refresh()),"ghost").pack(pady=2)
+
+        def _set_active(acc):
+            self.settings["active_account"]=acc.get("id")
+            _save_json(SETTINGS_F,self.settings); self._build_account_widget()
+        def _remove(acc):
+            self.accounts=[a for a in self.accounts if a.get("id")!=acc.get("id")]
+            _save_json(ACCOUNTS_F,self.accounts)
+            if self.settings.get("active_account")==acc.get("id"):
+                self.settings["active_account"]=self.accounts[0].get("id") if self.accounts else None
+                _save_json(SETTINGS_F,self.settings)
+            self._build_account_widget()
+
+        refresh()
+        br=ctk.CTkFrame(win,fg_color="transparent"); br.pack(pady=8)
+        self._btn(br,self._("add_ms"),lambda:self._ms_login(win,refresh),"acc").pack(side="left",padx=4)
+        self._btn(br,self._("add_ely"),lambda:self._ely_login(win,refresh),"ghost").pack(side="left",padx=4)
+        self._btn(br,self._("add_offline"),lambda:self._offline_login(win,refresh),"ghost").pack(side="left",padx=4)
+
+    # ── Microsoft ─────────────────────────────────────────────────────────
+    def _ms_login(self,parent,refresh_cb):
+        p=_pal()
+        win=ctk.CTkToplevel(parent); win.title(self._("ms_auth_title"))
+        win.geometry("480x260"); win.grab_set()
+        msg_v=ctk.StringVar(value=self._("checking"))
+        st_v =ctk.StringVar(value="")
+        ctk.CTkLabel(win,textvariable=msg_v,font=ctk.CTkFont(size=11),
+                     wraplength=440,justify="left").pack(expand=True,padx=24,pady=20)
+        ctk.CTkLabel(win,textvariable=st_v,text_color=self._accent,
+                     font=ctk.CTkFont(size=10)).pack()
+        def do_auth():
+            try:
+                resp=http_post(MS_DEVICE_URL,{"client_id":MS_CLIENT_ID,"scope":MS_SCOPE})
+                dev_code=resp["device_code"]; user_code=resp["user_code"]
+                verify_url=resp.get("verification_uri","https://microsoft.com/devicelogin")
+                interval=resp.get("interval",5); expires=resp.get("expires_in",300)
+                msg=self._("ms_auth_msg",url=verify_url,code=user_code)
+                self.after(0,lambda:msg_v.set(msg)); webbrowser.open(verify_url)
+                deadline=time.time()+expires; td=None
+                while time.time()<deadline:
+                    time.sleep(interval)
+                    try:
+                        td=http_post(MS_TOKEN_URL,{"client_id":MS_CLIENT_ID,"device_code":dev_code,
+                                     "grant_type":"urn:ietf:params:oauth:grant-type:device_code"})
+                        if "access_token" in td: break
+                        td=None
+                    except Exception as e:
+                        if "authorization_pending" in str(e): continue
+                        break
+                if not td or "access_token" not in td:
+                    self.after(0,lambda:st_v.set("Auth failed or timed out.")); return
+                ms_token=td["access_token"]
+                xbl=http_post(XBL_URL,{"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com",
+                              "RpsTicket":f"d={ms_token}"},"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"})
+                xbl_token=xbl["Token"]; uhs=xbl["DisplayClaims"]["xui"][0]["uhs"]
+                xsts=http_post(XSTS_URL,{"Properties":{"SandboxId":"RETAIL","UserTokens":[xbl_token]},
+                               "RelyingParty":"rp://api.minecraftservices.com/","TokenType":"JWT"})
+                xsts_token=xsts["Token"]
+                mc=http_post(MC_AUTH_URL,{"identityToken":f"XBL3.0 x={uhs};{xsts_token}"})
+                mc_token=mc["access_token"]
+                prof=http_get(MC_PROFILE,headers={"Authorization":f"Bearer {mc_token}"},timeout=8)
+                username=prof.get("name","Unknown"); raw_id=prof.get("id","")
+                uuid=(f"{raw_id[:8]}-{raw_id[8:12]}-{raw_id[12:16]}-{raw_id[16:20]}-{raw_id[20:]}"
+                      if len(raw_id)==32 else raw_id)
+                acc={"id":uuid,"username":username,"uuid":uuid,"type":"microsoft",
+                     "access_token":mc_token,"refresh_token":td.get("refresh_token","")}
+                self.accounts=[a for a in self.accounts if a.get("id")!=uuid]
+                self.accounts.append(acc); _save_json(ACCOUNTS_F,self.accounts)
+                if not self.settings.get("active_account"):
+                    self.settings["active_account"]=uuid; _save_json(SETTINGS_F,self.settings)
+                self.after(0,lambda:(refresh_cb(),self._build_account_widget(),win.destroy()))
+            except Exception as ex: self.after(0,lambda:st_v.set(f"Error: {ex}"))
+        threading.Thread(target=do_auth,daemon=True).start()
+
+    # ── Ely.By ────────────────────────────────────────────────────────────
+    def _ely_login(self,parent,refresh_cb):
+        p=_pal()
+        win=ctk.CTkToplevel(parent); win.title("Ely.By Login")
+        win.geometry("360x240"); win.grab_set()
+        form=ctk.CTkFrame(win,fg_color="transparent"); form.pack(fill="both",expand=True,padx=24,pady=16)
+        ctk.CTkLabel(form,text=self._("ely_user"),anchor="w").pack(anchor="w")
+        user_e=ctk.CTkEntry(form,placeholder_text="login@ely.by"); user_e.pack(fill="x",pady=(2,8))
+        ctk.CTkLabel(form,text=self._("ely_pass"),anchor="w").pack(anchor="w")
+        pass_e=ctk.CTkEntry(form,placeholder_text="••••••••",show="●"); pass_e.pack(fill="x",pady=(2,8))
+        st_v=ctk.StringVar(value="")
+        ctk.CTkLabel(form,textvariable=st_v,text_color=p["fg2"],font=ctk.CTkFont(size=10)).pack()
+        def do_login():
+            u=user_e.get().strip(); pw=pass_e.get().strip()
+            if not u or not pw: return
+            st_v.set("Logging in…")
+            def bg():
+                try:
+                    resp=http_post(ELY_AUTH_URL,{"username":u,"password":pw,
+                                   "clientToken":"MiniLauncher","requestUser":True})
+                    at=resp["accessToken"]; prof=resp.get("selectedProfile",{})
+                    name=prof.get("name",u); uid=prof.get("id","")
+                    uuid=(f"{uid[:8]}-{uid[8:12]}-{uid[12:16]}-{uid[16:20]}-{uid[20:]}"
+                          if len(uid)==32 else uid)
+                    acc={"id":uuid or u,"username":name,"uuid":uuid,"type":"ely","access_token":at}
+                    self.accounts=[a for a in self.accounts if a.get("id")!=(uuid or u)]
+                    self.accounts.append(acc); _save_json(ACCOUNTS_F,self.accounts)
+                    if not self.settings.get("active_account"):
+                        self.settings["active_account"]=acc["id"]; _save_json(SETTINGS_F,self.settings)
+                    self.after(0,lambda:(refresh_cb(),self._build_account_widget(),win.destroy()))
+                except Exception as ex: self.after(0,lambda:st_v.set(f"Error: {ex}"))
+            threading.Thread(target=bg,daemon=True).start()
+        self._btn(form,self._("ely_login"),do_login,"acc").pack(pady=(4,0))
+
+    # ── Offline ───────────────────────────────────────────────────────────
+    def _offline_login(self,parent,refresh_cb):
+        win=ctk.CTkToplevel(parent); win.title("Offline")
+        win.geometry("320x160"); win.grab_set()
+        form=ctk.CTkFrame(win,fg_color="transparent"); form.pack(fill="both",expand=True,padx=24,pady=20)
+        ctk.CTkLabel(form,text=self._("offline_name"),anchor="w").pack(anchor="w")
+        e=ctk.CTkEntry(form,placeholder_text="Player"); e.pack(fill="x",pady=6)
+        e.insert(0,"Player")
+        def add():
+            name=e.get().strip() or "Player"
+            uid=hashlib.md5(f"OfflinePlayer:{name}".encode()).hexdigest()
+            uuid=f"{uid[:8]}-{uid[8:12]}-{uid[12:16]}-{uid[16:20]}-{uid[20:]}"
+            acc={"id":uuid,"username":name,"uuid":uuid,"type":"offline","access_token":"0"}
+            self.accounts=[a for a in self.accounts if a.get("id")!=uuid]
+            self.accounts.append(acc); _save_json(ACCOUNTS_F,self.accounts)
+            if not self.settings.get("active_account"):
+                self.settings["active_account"]=uuid; _save_json(SETTINGS_F,self.settings)
+            refresh_cb(); self._build_account_widget(); win.destroy()
+        self._btn(form,"Add",add,"acc").pack(pady=4)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  PLAY PAGE
+    # ══════════════════════════════════════════════════════════════════════
     def _build_play_page(self):
-        t = self.t
-        frame = tk.Frame(self.content, bg=t["bg"])
+        p=_pal()
+        frame=ctk.CTkFrame(self.content,corner_radius=0,fg_color=p["bg"])
+        frame.grid_columnconfigure(0,weight=1); frame.grid_rowconfigure(1,weight=1)
 
-        hdr = tk.Frame(frame, bg=t["bg2"], pady=12)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text=self._("play_title"), bg=t["bg2"], fg=t["fg"],
-                 font=("Segoe UI", 14, "bold"), padx=20).pack(side="left")
+        # Header
+        hdr=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=52)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        hdr.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(hdr,text=self._("play_title"),
+                     font=ctk.CTkFont(size=16,weight="bold")).grid(row=0,column=0,sticky="w",padx=20,pady=12)
+        self.java_status_lbl=ctk.CTkLabel(hdr,text="",font=ctk.CTkFont(size=10),text_color=p["fg2"])
+        self.java_status_lbl.grid(row=0,column=1,sticky="e",padx=20)
 
-        inner = tk.Frame(frame, bg=t["bg"], padx=20, pady=14)
-        inner.pack(fill="both", expand=True)
+        # Body
+        body=CTkScrollFrame2(frame); body.grid(row=1,column=0,sticky="nsew")
+        body.grid_columnconfigure(0,weight=1)
 
-        tk.Label(inner, text=self._("mc_version"), bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(anchor="w")
+        # Instance row
+        ir=ctk.CTkFrame(body,fg_color="transparent"); ir.pack(fill="x",padx=20,pady=(16,0))
+        ctk.CTkLabel(ir,text="Instance:",font=ctk.CTkFont(size=12),width=120,anchor="w").pack(side="left")
+        self.play_inst_var=ctk.StringVar(value="(default)")
+        self.play_inst_combo=ctk.CTkComboBox(ir,variable=self.play_inst_var,
+                                              values=["(default)"]+[i["name"] for i in self.instances],
+                                              state="readonly",width=220)
+        self.play_inst_combo.pack(side="left")
 
-        ver_row = tk.Frame(inner, bg=t["bg"])
-        ver_row.pack(fill="x", pady=4)
-        self.version_var = tk.StringVar()
-        self.version_combo = ttk.Combobox(
-            ver_row, textvariable=self.version_var,
-            font=("Segoe UI", 11), state="readonly", width=22)
-        self.version_combo.pack(side="left")
+        # Version row
+        vr=ctk.CTkFrame(body,fg_color="transparent"); vr.pack(fill="x",padx=20,pady=(12,0))
+        ctk.CTkLabel(vr,text=self._("mc_ver"),font=ctk.CTkFont(size=12),width=120,anchor="w").pack(side="left")
+        self.version_var=ctk.StringVar()
+        self.version_combo=ctk.CTkComboBox(vr,variable=self.version_var,values=[],
+                                            state="readonly",width=200)
+        self.version_combo.pack(side="left",padx=(0,12))
+        self.ver_type_var=ctk.StringVar(value="release")
+        ctk.CTkRadioButton(vr,text=self._("releases"),variable=self.ver_type_var,value="release",
+                           command=self._filter_versions).pack(side="left",padx=(0,8))
+        ctk.CTkRadioButton(vr,text=self._("snapshots"),variable=self.ver_type_var,value="snapshot",
+                           command=self._filter_versions).pack(side="left")
 
-        self.ver_type_var = tk.StringVar(value="release")
-        tk.Radiobutton(ver_row, text=self._("releases"),
-                       variable=self.ver_type_var, value="release",
-                       bg=t["bg"], fg=t["fg"], selectcolor=t["bg3"],
-                       activebackground=t["bg"],
-                       command=self._filter_versions).pack(side="left", padx=(10,2))
-        tk.Radiobutton(ver_row, text=self._("snapshots"),
-                       variable=self.ver_type_var, value="snapshot",
-                       bg=t["bg"], fg=t["fg"], selectcolor=t["bg3"],
-                       activebackground=t["bg"],
-                       command=self._filter_versions).pack(side="left")
+        # Buttons
+        br=ctk.CTkFrame(body,fg_color="transparent"); br.pack(fill="x",padx=20,pady=12)
+        self._btn(br,self._("btn_install"),self._install_version,"ghost").pack(side="left")
+        self._btn(br,self._("btn_launch"),self._launch_game,"acc").pack(side="left",padx=(10,0))
 
-        btn_row = tk.Frame(inner, bg=t["bg"])
-        btn_row.pack(fill="x", pady=(6, 0))
-        self._btn(btn_row, self._("btn_install"), self._install_version,
-                  style="ghost").pack(side="left")
-        self._btn(btn_row, self._("btn_launch"), self._launch_game,
-                  style="acc").pack(side="left", padx=(8, 0))
+        CTkSep(body)
 
-        tk.Label(inner, text=self._("installed_vers"), bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(anchor="w", pady=(12, 4))
-        self.installed_listbox = tk.Listbox(
-            inner, height=4,
-            bg=t["bg3"], fg=t["fg"], relief="flat", bd=0,
-            font=("Segoe UI", 10), selectbackground=t["sel"],
-            selectforeground=t["fg"], activestyle="none",
-            highlightthickness=1, highlightbackground=t["border"])
-        self.installed_listbox.pack(fill="x")
-        self.installed_listbox.bind("<<ListboxSelect>>", self._on_installed_select)
+        # Installed versions
+        ctk.CTkLabel(body,text=self._("installed"),font=ctk.CTkFont(size=12),
+                     text_color=p["fg2"]).pack(anchor="w",padx=20,pady=(0,4))
+        self.installed_lb=ctk.CTkTextbox(body,height=80,font=ctk.CTkFont(family="Consolas",size=11),
+                                          state="disabled",corner_radius=8)
+        self.installed_lb.pack(fill="x",padx=20)
 
-        tk.Label(inner, text=self._("log_title"), bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 4))
-        self.log_text = scrolledtext.ScrolledText(
-            inner, height=7,
-            bg=t["bg2"], fg=t["fg"],
-            font=("Consolas", 9), relief="flat", bd=0,
-            state="disabled", wrap="word",
-            highlightthickness=1, highlightbackground=t["border"])
-        self.log_text.pack(fill="both", expand=True)
+        CTkSep(body)
 
-        self.progress_var   = tk.DoubleVar()
-        self.progress_label = tk.Label(inner, text="", bg=t["bg"], fg=t["fg2"],
-                                       font=("Segoe UI", 9))
-        self.progress_label.pack(anchor="w", pady=(6, 2))
-        sty = ttk.Style()
-        sty.theme_use("default")
-        sty.configure("G.Horizontal.TProgressbar",
-                      troughcolor=t["bg3"], background=t["acc"], thickness=5)
-        self.progress_bar = ttk.Progressbar(
-            inner, variable=self.progress_var, maximum=100,
-            style="G.Horizontal.TProgressbar")
-        self.progress_bar.pack(fill="x")
+        # Log
+        ctk.CTkLabel(body,text=self._("log_lbl"),font=ctk.CTkFont(size=12),
+                     text_color=p["fg2"]).pack(anchor="w",padx=20,pady=(0,4))
+        self.log_text=ctk.CTkTextbox(body,height=160,font=ctk.CTkFont(family="Consolas",size=10),
+                                      state="disabled",corner_radius=8)
+        self.log_text.pack(fill="both",expand=True,padx=20)
+
+        # Progress
+        self.progress_lbl=ctk.CTkLabel(body,text="",font=ctk.CTkFont(size=10),text_color=p["fg2"])
+        self.progress_lbl.pack(anchor="w",padx=20,pady=(6,2))
+        self.progress_bar=ctk.CTkProgressBar(body,height=6,progress_color=self._accent,corner_radius=3)
+        self.progress_bar.pack(fill="x",padx=20,pady=(0,16))
+        self.progress_bar.set(0)
 
         return frame
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Servers page
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    #  INSTANCES PAGE
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_instances_page(self):
+        p=_pal()
+        frame=ctk.CTkFrame(self.content,corner_radius=0,fg_color=p["bg"])
+        frame.grid_columnconfigure(0,weight=1); frame.grid_rowconfigure(1,weight=1)
+        hdr=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=52)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        ctk.CTkLabel(hdr,text=self._("inst_t"),font=ctk.CTkFont(size=16,weight="bold")
+                     ).pack(side="left",padx=20,pady=12)
+        self.inst_scroll=CTkScrollFrame2(frame)
+        self.inst_scroll.grid(row=1,column=0,sticky="nsew")
+        self.inst_scroll.grid_columnconfigure(0,weight=1)
+        footer=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=54)
+        footer.grid(row=2,column=0,sticky="ew"); footer.grid_propagate(False)
+        self._btn(footer,self._("btn_new_inst"),self._inst_create_dialog,"acc").pack(pady=10)
+        self._inst_refresh()
+        return frame
+
+    def _inst_refresh(self):
+        for w in self.inst_scroll.winfo_children(): w.destroy()
+        if not self.instances:
+            ctk.CTkLabel(self.inst_scroll,text=self._("no_inst"),
+                         text_color=_pal()["fg2"],font=ctk.CTkFont(size=13)).pack(pady=40); return
+        for inst in self.instances: self._inst_add_card(inst)
+
+    def _inst_add_card(self,inst):
+        p=_pal()
+        name=inst.get("name","?"); ver=inst.get("mc_version","?")
+        loader=inst.get("loader","Vanilla"); l_ver=inst.get("loader_version","")
+        lcolor=SERVER_CORES.get(loader,{}).get("color",self._accent)
+
+        card=ctk.CTkFrame(self.inst_scroll,corner_radius=10,
+                          fg_color=p["card"],border_width=1,border_color=p["border"])
+        card.pack(fill="x",padx=16,pady=5)
+
+        # colour stripe
+        stripe=ctk.CTkFrame(card,width=6,corner_radius=0,fg_color=lcolor)
+        stripe.pack(side="left",fill="y")
+
+        body=ctk.CTkFrame(card,fg_color="transparent")
+        body.pack(side="left",fill="both",expand=True,padx=14,pady=10)
+        ctk.CTkLabel(body,text=name,font=ctk.CTkFont(size=13,weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(body,text=f"MC {ver}  •  {loader} {l_ver}",
+                     font=ctk.CTkFont(size=11),text_color=p["fg2"]).pack(anchor="w",pady=(2,0))
+        mods_dir=inst.get("mods_dir","")
+        if mods_dir and os.path.exists(mods_dir):
+            n=len([f for f in os.listdir(mods_dir) if f.endswith(".jar")])
+            ctk.CTkLabel(body,text=f"{n} mods",font=ctk.CTkFont(size=10),text_color=p["fg2"]).pack(anchor="w")
+
+        btns=ctk.CTkFrame(card,fg_color="transparent")
+        btns.pack(side="right",padx=10,pady=8)
+        self._btn(btns,"▶ Launch",lambda n=name:self._launch_instance(n),"acc").pack(fill="x",pady=2)
+        self._btn(btns,"📂 Folder",lambda d=inst.get("dir",""):self._open_folder(d),"ghost").pack(fill="x",pady=2)
+        self._btn(btns,self._("delete"),lambda n=name:self._inst_delete(n),"ghost").pack(fill="x",pady=2)
+
+    def _open_folder(self,path):
+        if not path or not os.path.exists(path): return
+        if sys.platform=="win32": os.startfile(path)
+        elif sys.platform=="darwin": subprocess.Popen(["open",path])
+        else: subprocess.Popen(["xdg-open",path])
+
+    def _inst_create_dialog(self):
+        p=_pal()
+        win=ctk.CTkToplevel(self); win.title(self._("new_inst"))
+        win.geometry("440x380"); win.grab_set()
+        ctk.CTkLabel(win,text=self._("new_inst"),font=ctk.CTkFont(size=16,weight="bold")).pack(pady=(16,8))
+        form=ctk.CTkFrame(win,fg_color="transparent"); form.pack(fill="x",padx=24)
+        def frow(lk,opts=None,default=""):
+            r=ctk.CTkFrame(form,fg_color="transparent"); r.pack(fill="x",pady=4)
+            ctk.CTkLabel(r,text=self._(lk),width=130,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+            v=ctk.StringVar(value=default)
+            if opts: w=ctk.CTkComboBox(r,variable=v,values=opts,state="readonly",width=200)
+            else:    w=ctk.CTkEntry(r,textvariable=v,width=200,placeholder_text=default)
+            w.pack(side="left"); return v
+        name_v  = frow("inst_name",default="My Instance")
+        mc_list = [v["id"] for v in self.mc_versions if v["type"]=="release"][:40] or ["1.21.4"]
+        ver_v   = frow("inst_ver",mc_list,mc_list[0] if mc_list else "1.21.4")
+        load_v  = frow("inst_loader",["Vanilla","Fabric","Forge","NeoForge","Quilt"],"Vanilla")
+        lver_v  = frow("inst_lver",default="latest")
+        st_v=ctk.StringVar(value="")
+        ctk.CTkLabel(form,textvariable=st_v,font=ctk.CTkFont(size=11),
+                     text_color=self._accent).pack(anchor="w",pady=4)
+        br=ctk.CTkFrame(win,fg_color="transparent"); br.pack(pady=8)
+        def do_create():
+            n=name_v.get().strip()
+            if not n: return
+            if any(i["name"]==n for i in self.instances):
+                messagebox.showwarning(self._("warn"),f"«{n}» exists"); return
+            mc_ver=ver_v.get(); loader=load_v.get(); l_ver=lver_v.get().strip() or "latest"
+            inst_dir=os.path.join(INSTANCES_DIR,n); mods_dir=os.path.join(inst_dir,"mods")
+            os.makedirs(mods_dir,exist_ok=True)
+            inst={"name":n,"mc_version":mc_ver,"loader":loader,
+                  "loader_version":l_ver,"dir":inst_dir,"mods_dir":mods_dir}
+            self.instances.append(inst); _save_json(INSTANCES_F,self.instances)
+            st_v.set(f"Installing {loader} {mc_ver}…")
+            def bg():
+                try:
+                    cbs={"setStatus":lambda s:self.after(0,lambda:st_v.set(s)),
+                         "setProgress":lambda v:None,"setMax":lambda v:None}
+                    if loader=="Fabric":
+                        inst_l=http_get("https://meta.fabricmc.net/v2/versions/installer",timeout=10)[0]["version"]
+                        ldr_l =http_get("https://meta.fabricmc.net/v2/versions/loader",timeout=10)[0]["version"]
+                        url=(f"https://meta.fabricmc.net/v2/versions/loader/{mc_ver}/{ldr_l}/{inst_l}/server/jar")
+                        dest=os.path.join(inst_dir,f"fabric-server-{mc_ver}.jar")
+                        http_download(url,dest,lambda d,t:st_v.set(f"Fabric {int(d/t*100)}%"))
+                    elif loader=="Quilt":
+                        ldr_l=http_get("https://meta.quiltmc.org/v3/versions/loader",timeout=10)[0]["version"]
+                        url=(f"https://meta.quiltmc.org/v3/versions/loader/{mc_ver}/{ldr_l}/server/jar")
+                        dest=os.path.join(inst_dir,f"quilt-server-{mc_ver}.jar")
+                        http_download(url,dest,lambda d,t:st_v.set(f"Quilt {int(d/t*100)}%"))
+                    else:
+                        minecraft_launcher_lib.install.install_minecraft_version(mc_ver,inst_dir,callback=cbs)
+                    self.after(0,lambda:(self._inst_refresh(),self._refresh_play_instances(),win.destroy()))
+                except Exception as ex: self.after(0,lambda:st_v.set(f"✗ {ex}"))
+            threading.Thread(target=bg,daemon=True).start()
+        self._btn(br,"Create",do_create,"acc").pack(side="left",padx=4)
+        self._btn(br,self._("cancel"),win.destroy,"ghost").pack(side="left",padx=4)
+
+    def _inst_delete(self,name):
+        if not messagebox.askyesno(self._("warn"),f"Delete instance «{name}»?"): return
+        inst=next((i for i in self.instances if i["name"]==name),None)
+        if inst and os.path.exists(inst.get("dir","")): shutil.rmtree(inst["dir"],ignore_errors=True)
+        self.instances=[i for i in self.instances if i["name"]!=name]
+        _save_json(INSTANCES_F,self.instances); self._inst_refresh(); self._refresh_play_instances()
+
+    def _launch_instance(self,name):
+        inst=next((i for i in self.instances if i["name"]==name),None)
+        if not inst: return
+        self.play_inst_var.set(name); self.version_var.set(inst["mc_version"])
+        self._show_tab("play"); self._launch_game()
+
+    def _refresh_play_instances(self):
+        try:
+            names=["(default)"]+[i["name"] for i in self.instances]
+            self.play_inst_combo.configure(values=names)
+            self.mr_inst_combo.configure(values=names)
+        except: pass
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  SERVERS PAGE
+    # ══════════════════════════════════════════════════════════════════════
     def _build_servers_page(self):
-        t = self.t
-        frame = tk.Frame(self.content, bg=t["bg"])
-
-        hdr = tk.Frame(frame, bg=t["bg2"], pady=12)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text=self._("servers_title"), bg=t["bg2"], fg=t["fg"],
-                 font=("Segoe UI", 14, "bold"), padx=20).pack(side="left")
-
-        list_wrap = tk.Frame(frame, bg=t["bg"])
-        list_wrap.pack(fill="both", expand=True)
-
-        self.srv_canvas = tk.Canvas(list_wrap, bg=t["bg"], highlightthickness=0)
-        srv_vscr = tk.Scrollbar(list_wrap, orient="vertical",
-                                command=self.srv_canvas.yview)
-        self.srv_canvas.configure(yscrollcommand=srv_vscr.set)
-        self.srv_canvas.pack(side="left", fill="both", expand=True)
-        srv_vscr.pack(side="right", fill="y")
-
-        self.srv_list_frame = tk.Frame(self.srv_canvas, bg=t["bg"])
-        self._srv_win_id = self.srv_canvas.create_window(
-            (0, 0), window=self.srv_list_frame, anchor="nw")
-        self.srv_list_frame.bind("<Configure>",
-            lambda e: self.srv_canvas.configure(
-                scrollregion=self.srv_canvas.bbox("all")))
-        self.srv_canvas.bind("<Configure>",
-            lambda e: self.srv_canvas.itemconfig(self._srv_win_id, width=e.width))
-        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.srv_canvas.bind(ev, self._srv_scroll)
-
-        bottom = tk.Frame(frame, bg=t["bg2"], pady=10)
-        bottom.pack(fill="x", side="bottom")
-        self._btn(bottom, self._("btn_create_server"),
-                  self._srv_create_dialog, style="acc").pack()
-
+        p=_pal()
+        frame=ctk.CTkFrame(self.content,corner_radius=0,fg_color=p["bg"])
+        frame.grid_columnconfigure(0,weight=1); frame.grid_rowconfigure(1,weight=1)
+        hdr=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=52)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        ctk.CTkLabel(hdr,text=self._("servers_title"),font=ctk.CTkFont(size=16,weight="bold")
+                     ).pack(side="left",padx=20,pady=12)
+        self.srv_scroll=CTkScrollFrame2(frame)
+        self.srv_scroll.grid(row=1,column=0,sticky="nsew")
+        self.srv_scroll.grid_columnconfigure(0,weight=1)
+        footer=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=54)
+        footer.grid(row=2,column=0,sticky="ew"); footer.grid_propagate(False)
+        self._btn(footer,self._("btn_create_srv"),self._srv_create_dialog,"acc").pack(pady=10)
         return frame
-
-    def _srv_scroll(self, e):
-        if e.num == 4:   self.srv_canvas.yview_scroll(-1, "units")
-        elif e.num == 5: self.srv_canvas.yview_scroll(1, "units")
-        else:            self.srv_canvas.yview_scroll(-1*(e.delta//120), "units")
 
     def _srv_refresh_list(self):
-        t = self.t
-        for w in self.srv_list_frame.winfo_children():
-            w.destroy()
+        for w in self.srv_scroll.winfo_children(): w.destroy()
         if not self.servers:
-            tk.Label(self.srv_list_frame,
-                     text=self._("no_servers"),
-                     bg=t["bg"], fg=t["fg2"],
-                     font=("Segoe UI", 11), pady=40).pack()
-            return
-        for srv in self.servers:
-            self._srv_add_card(srv)
+            ctk.CTkLabel(self.srv_scroll,text=self._("no_servers"),
+                         text_color=_pal()["fg2"],font=ctk.CTkFont(size=13)).pack(pady=40); return
+        for srv in self.servers: self._srv_add_card(srv)
 
-    def _srv_add_card(self, srv):
-        t      = self.t
-        name   = srv.get("name", "Server")
-        core   = srv.get("core", "Paper")
-        ver    = srv.get("version", "?")
-        port   = srv.get("port", 25565)
-        status = self._srv_get_status(name)
-        sc     = STATUS_COLORS.get(status, "#888888")
-        cc     = SERVER_CORES.get(core, {}).get("color", "#888888")
+    def _srv_add_card(self,srv):
+        p=_pal()
+        name=srv.get("name","Server"); core=srv.get("core","Paper")
+        ver=srv.get("version","?"); port=srv.get("port",25565)
+        proc=self.server_processes.get(name); online=proc and proc.poll() is None
+        sc="#5dbb63" if online else "#e05050"
+        cc=SERVER_CORES.get(core,{}).get("color","#888")
 
-        # Status display text
-        status_text = {
-            "offline": "offline", "online": "online",
-            "starting": "starting…", "stopping": "stopping…"
-        }.get(status, status)
+        card=ctk.CTkFrame(self.srv_scroll,corner_radius=10,
+                          fg_color=p["card"],border_width=1,border_color=p["border"])
+        card.pack(fill="x",padx=16,pady=5)
+        stripe=ctk.CTkFrame(card,width=6,corner_radius=0,fg_color=sc)
+        stripe.pack(side="left",fill="y")
 
-        card = tk.Frame(self.srv_list_frame, bg=t["card"],
-                        highlightbackground=t["border"], highlightthickness=1)
-        card.pack(fill="x", pady=4, padx=12)
+        info=ctk.CTkFrame(card,fg_color="transparent")
+        info.pack(side="left",fill="both",expand=True,padx=14,pady=10)
+        r1=ctk.CTkFrame(info,fg_color="transparent"); r1.pack(anchor="w",fill="x")
+        ctk.CTkLabel(r1,text=name,font=ctk.CTkFont(size=13,weight="bold")).pack(side="left")
+        ctk.CTkLabel(r1,text=f"  {'● online' if online else '○ offline'}",
+                     text_color=sc,font=ctk.CTkFont(size=11)).pack(side="left")
+        r2=ctk.CTkFrame(info,fg_color="transparent"); r2.pack(anchor="w",pady=(3,0))
+        ctk.CTkLabel(r2,text=core,text_color=cc,font=ctk.CTkFont(size=11,weight="bold")).pack(side="left")
+        ctk.CTkLabel(r2,text=f"  {ver}  •  :{port}",
+                     text_color=p["fg2"],font=ctk.CTkFont(size=11)).pack(side="left")
 
-        tk.Frame(card, bg=sc, width=5).pack(side="left", fill="y")
-
-        info = tk.Frame(card, bg=t["card"])
-        info.pack(side="left", fill="both", expand=True, padx=14, pady=10)
-
-        r1 = tk.Frame(info, bg=t["card"])
-        r1.pack(anchor="w", fill="x")
-        tk.Label(r1, text=name, bg=t["card"], fg=t["fg"],
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
-        tk.Label(r1, text=f"  {status_text}", bg=t["card"], fg=sc,
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
-
-        r2 = tk.Frame(info, bg=t["card"])
-        r2.pack(anchor="w", pady=(3, 0))
-        tk.Label(r2, text=core, bg=t["card"], fg=cc,
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
-        tk.Label(r2, text=f"  {ver}  •  port {port}",
-                 bg=t["card"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="left")
-
-        btns = tk.Frame(card, bg=t["card"])
-        btns.pack(side="right", padx=10, pady=8)
-
-        if status == "online":
-            self._btn(btns, self._("btn_stop"),
-                      lambda n=name: self._srv_stop(n),
-                      style="ghost").pack(fill="x", pady=2)
+        btns=ctk.CTkFrame(card,fg_color="transparent")
+        btns.pack(side="right",padx=10,pady=8)
+        if online:
+            self._btn(btns,self._("stop"),    lambda n=name:self._srv_stop(n),"ghost").pack(fill="x",pady=2)
         else:
-            self._btn(btns, self._("btn_start"),
-                      lambda n=name: self._srv_start(n),
-                      style="acc").pack(fill="x", pady=2)
+            self._btn(btns,self._("start"),   lambda n=name:self._srv_start(n),"acc").pack(fill="x",pady=2)
+        self._btn(btns,self._("console"),     lambda n=name:self._srv_open_console(n),"ghost").pack(fill="x",pady=2)
+        self._btn(btns,self._("dashboard"),   lambda n=name:self._srv_dashboard(n),"ghost").pack(fill="x",pady=2)
+        self._btn(btns,self._("plugins"),     lambda n=name:self._srv_open_plugins(n),"ghost").pack(fill="x",pady=2)
+        self._btn(btns,self._("delete"),      lambda n=name:self._srv_delete(n),"ghost").pack(fill="x",pady=2)
 
-        self._btn(btns, self._("btn_console"),
-                  lambda n=name: self._srv_open_console(n),
-                  style="ghost").pack(fill="x", pady=2)
-        self._btn(btns, self._("btn_plugins"),
-                  lambda n=name: self._srv_open_plugins(n),
-                  style="ghost").pack(fill="x", pady=2)
-        self._btn(btns, self._("btn_delete"),
-                  lambda n=name: self._srv_delete(n),
-                  style="ghost").pack(fill="x", pady=2)
-
-    def _srv_get_status(self, name):
-        proc = self.server_processes.get(name)
-        if proc is None:  return "offline"
-        if proc.poll() is None: return "online"
-        return "offline"
-
-    # ── Create server dialog ──────────────────────────────────────────────────
+    # ── Server create dialog ──────────────────────────────────────────────
     def _srv_create_dialog(self):
-        t   = self.t
-        win = tk.Toplevel(self)
-        win.title(self._("new_server"))
-        win.geometry("520x500")
-        win.configure(bg=t["bg"])
-        win.resizable(False, False)
-        win.grab_set()
+        p=_pal()
+        win=ctk.CTkToplevel(self); win.title(self._("new_srv"))
+        win.geometry("500x500"); win.grab_set()
+        ctk.CTkLabel(win,text=self._("new_srv"),font=ctk.CTkFont(size=16,weight="bold")).pack(pady=(16,8))
+        form=ctk.CTkFrame(win,fg_color="transparent"); form.pack(fill="x",padx=24)
 
-        tk.Label(win, text=self._("new_server"), bg=t["bg"], fg=t["fg"],
-                 font=("Segoe UI", 13, "bold"), pady=12).pack()
+        ctk.CTkLabel(form,text=self._("srv_name"),anchor="w",font=ctk.CTkFont(size=12)).pack(anchor="w")
+        name_e=ctk.CTkEntry(form,placeholder_text="My Server"); name_e.pack(fill="x",pady=(2,8))
 
-        form = tk.Frame(win, bg=t["bg"], padx=24)
-        form.pack(fill="x")
+        ctk.CTkLabel(form,text=self._("srv_core"),anchor="w",font=ctk.CTkFont(size=12)).pack(anchor="w")
+        core_v=ctk.StringVar(value="Paper")
+        core_cb=ctk.CTkComboBox(form,variable=core_v,values=list(SERVER_CORES.keys()),
+                                 state="readonly",width=280); core_cb.pack(anchor="w",pady=(2,8))
 
-        def frow(label_key, widget_fn):
-            r = tk.Frame(form, bg=t["bg"])
-            r.pack(fill="x", pady=4)
-            tk.Label(r, text=self._(label_key), bg=t["bg"], fg=t["fg2"],
-                     font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-            widget_fn(r).pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(form,text=self._("srv_ver"),anchor="w",font=ctk.CTkFont(size=12)).pack(anchor="w")
+        ver_v=ctk.StringVar(value="1.21.4")
+        ver_cb=ctk.CTkComboBox(form,variable=ver_v,values=SERVER_CORES["Paper"]["versions"],
+                                state="readonly",width=280); ver_cb.pack(anchor="w",pady=(2,8))
+        def on_core(_=None):
+            c=core_v.get(); vers=SERVER_CORES.get(c,{}).get("versions",["latest"])
+            ver_cb.configure(values=vers); ver_v.set(vers[0])
+            desc_lbl.configure(text=SERVER_CORES.get(c,{}).get("desc",""),
+                               text_color=SERVER_CORES.get(c,{}).get("color",self._accent))
+        core_v.trace_add("write",lambda *_:on_core())
 
-        name_var = tk.StringVar(value="My Server")
-        frow("srv_name", lambda p: tk.Entry(
-            p, textvariable=name_var,
-            bg=t["entry"], fg=t["fg"], insertbackground=t["fg"],
-            font=("Segoe UI", 10), relief="flat", bd=0,
-            highlightbackground=t["border"], highlightthickness=1))
+        r=ctk.CTkFrame(form,fg_color="transparent"); r.pack(fill="x",pady=(0,8))
+        ctk.CTkLabel(r,text=self._("srv_port"),width=80,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        port_e=ctk.CTkEntry(r,width=100,placeholder_text="25565"); port_e.pack(side="left",padx=(0,20))
+        port_e.insert(0,"25565")
+        ctk.CTkLabel(r,text=self._("srv_ram"),width=80,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        ram_e=ctk.CTkEntry(r,width=100,placeholder_text="1024"); ram_e.pack(side="left")
+        ram_e.insert(0,"1024")
 
-        # Core selector with categories
-        core_names = list(SERVER_CORES.keys())
-        core_var = tk.StringVar(value="Paper")
-        frow("srv_core", lambda p: ttk.Combobox(
-            p, textvariable=core_var, values=core_names,
-            state="readonly", font=("Segoe UI", 10), width=18))
+        desc_lbl=ctk.CTkLabel(form,text=SERVER_CORES["Paper"]["desc"],
+                               text_color=SERVER_CORES["Paper"]["color"],
+                               font=ctk.CTkFont(size=11),wraplength=440,justify="left")
+        desc_lbl.pack(anchor="w",pady=(0,4))
 
-        ver_var          = tk.StringVar(value="1.21.4")
-        ver_combo_holder = [None]
-        def mk_ver(p):
-            cb = ttk.Combobox(p, textvariable=ver_var,
-                              values=SERVER_CORES["Paper"]["versions"],
-                              state="readonly", font=("Segoe UI", 10), width=18)
-            ver_combo_holder[0] = cb
-            return cb
-        frow("srv_version", mk_ver)
-
-        def on_core_change(*_):
-            c    = core_var.get()
-            vers = SERVER_CORES.get(c, {}).get("versions", ["latest"])
-            if ver_combo_holder[0]:
-                ver_combo_holder[0]["values"] = vers
-                ver_var.set(vers[0] if vers else "latest")
-            # Update desc
-            lang_key = "desc_" + (self._lang if self._lang in ("en","ru") else "en")
-            desc = SERVER_CORES.get(c, {}).get(lang_key,
-                   SERVER_CORES.get(c, {}).get("desc_en", ""))
-            cc   = SERVER_CORES.get(c, {}).get("color", t["acc"])
-            core_desc_var.set(desc)
-            core_color_lbl.configure(fg=cc)
-        core_var.trace_add("write", on_core_change)
-
-        port_var = tk.StringVar(value="25565")
-        frow("srv_port", lambda p: tk.Entry(
-            p, textvariable=port_var,
-            bg=t["entry"], fg=t["fg"], insertbackground=t["fg"],
-            font=("Segoe UI", 10), relief="flat", bd=0, width=8,
-            highlightbackground=t["border"], highlightthickness=1))
-
-        ram_var = tk.StringVar(value="1024")
-        frow("srv_ram", lambda p: tk.Entry(
-            p, textvariable=ram_var,
-            bg=t["entry"], fg=t["fg"], insertbackground=t["fg"],
-            font=("Segoe UI", 10), relief="flat", bd=0, width=8,
-            highlightbackground=t["border"], highlightthickness=1))
-
-        # Core description label
-        lang_key_init = "desc_" + (self._lang if self._lang in ("en","ru") else "en")
-        init_desc = SERVER_CORES["Paper"].get(lang_key_init,
-                    SERVER_CORES["Paper"].get("desc_en", ""))
-        core_desc_var = tk.StringVar(value=init_desc)
-        core_color_lbl = tk.Label(form, textvariable=core_desc_var,
-                                  bg=t["bg"], fg=SERVER_CORES["Paper"]["color"],
-                                  font=("Segoe UI", 9), wraplength=400, justify="left")
-        core_color_lbl.pack(anchor="w", pady=(4, 0))
-
-        # Warning for non-downloadable cores
-        warn_var = tk.StringVar(value="")
-        tk.Label(form, textvariable=warn_var,
-                 bg=t["bg"], fg="#e0a020",
-                 font=("Segoe UI", 8), wraplength=400, justify="left").pack(anchor="w")
-
-        def on_core_change2(*_):
-            c = core_var.get()
-            if c not in DOWNLOADABLE_CORES:
-                warn_var.set(
-                    "⚠ Auto-download not supported for this core. "
-                    "Place the server jar manually in the server folder."
-                    if self._lang == "en" else
-                    "⚠ Автозагрузка не поддерживается для этого ядра. "
-                    "Поместите jar вручную в папку сервера.")
-            else:
-                warn_var.set("")
-        core_var.trace_add("write", on_core_change2)
-
-        tk.Frame(win, bg=t["border"], height=1).pack(fill="x", padx=20, pady=10)
-
-        btn_row    = tk.Frame(win, bg=t["bg"])
-        btn_row.pack()
-        status_lbl = tk.Label(win, text="", bg=t["bg"], fg=t["acc"],
-                              font=("Segoe UI", 9))
-        status_lbl.pack(pady=4)
+        st_v=ctk.StringVar(value="")
+        ctk.CTkLabel(form,textvariable=st_v,text_color=self._accent,font=ctk.CTkFont(size=11)).pack(anchor="w")
+        br=ctk.CTkFrame(win,fg_color="transparent"); br.pack(pady=8)
 
         def do_create():
-            n    = name_var.get().strip()
-            core = core_var.get()
-            ver  = ver_var.get()
-            if not n:
-                messagebox.showwarning(self._("warn_title"), self._("name_empty"))
-                return
-            if any(s["name"] == n for s in self.servers):
-                messagebox.showwarning(self._("warn_title"), self._("name_exists", name=n))
-                return
-            try:
-                port = int(port_var.get().strip())
-                ram  = int(ram_var.get().strip())
-            except ValueError:
-                messagebox.showwarning(self._("warn_title"), self._("port_ram_invalid"))
-                return
+            n=name_e.get().strip()
+            if not n: messagebox.showwarning(self._("warn"),self._("name_empty")); return
+            if any(s["name"]==n for s in self.servers):
+                messagebox.showwarning(self._("warn"),self._("name_exists",n=n)); return
+            try: port=int(port_e.get()); ram=int(ram_e.get())
+            except: messagebox.showwarning(self._("warn"),self._("port_invalid")); return
+            core=core_v.get(); ver=ver_v.get()
+            srv_dir=os.path.join(SERVERS_DIR,n); os.makedirs(srv_dir,exist_ok=True)
+            new_srv={"name":n,"core":core,"version":ver,"port":port,"ram":ram,"dir":srv_dir,"jar":""}
+            self.servers.append(new_srv); _save_json(SERVERS_F,self.servers)
+            st_v.set(self._("creating",core=core,ver=ver))
+            threading.Thread(target=self._srv_download_core,args=(new_srv,st_v,win),daemon=True).start()
 
-            srv_dir = os.path.join(SERVERS_DIR, n)
-            os.makedirs(srv_dir, exist_ok=True)
-            new_srv = {"name": n, "core": core, "version": ver,
-                       "port": port, "ram": ram, "dir": srv_dir, "jar": ""}
-            self.servers.append(new_srv)
-            save_servers(self.servers)
+        self._btn(br,self._("btn_create"),do_create,"acc").pack(side="left",padx=4)
+        self._btn(br,self._("cancel"),win.destroy,"ghost").pack(side="left",padx=4)
 
-            status_lbl.configure(
-                text=self._("folder_created", core=core, ver=ver))
-            win.update()
-
-            threading.Thread(target=self._srv_download_core,
-                             args=(new_srv, status_lbl, win),
-                             daemon=True).start()
-
-        self._btn(btn_row, self._("btn_create"), do_create,
-                  style="acc").pack(side="left", padx=4)
-        self._btn(btn_row, self._("btn_cancel"), win.destroy,
-                  style="ghost").pack(side="left", padx=4)
-
-    # ── Core downloaders ──────────────────────────────────────────────────────
-    def _srv_download_core(self, srv, status_lbl, win):
-        core    = srv["core"]
-        ver     = srv["version"]
-        srv_dir = srv["dir"]
-
-        def upd(msg):
-            try:
-                self.after(0, lambda: status_lbl.configure(text=msg))
-            except Exception:
-                pass
-
+    def _srv_download_core(self,srv,st_v,win):
+        core=srv["core"]; ver=srv["version"]; d=srv["dir"]
+        def upd(m): self.after(0,lambda:st_v.set(m))
         try:
-            jar_path = ""
-            if   core == "Paper":      jar_path = self._dl_paper(ver, srv_dir, upd)
-            elif core == "Purpur":     jar_path = self._dl_purpur(ver, srv_dir, upd)
-            elif core == "Velocity":   jar_path = self._dl_velocity(srv_dir, upd)
-            elif core == "Waterfall":  jar_path = self._dl_waterfall(srv_dir, upd)
-            elif core == "BungeeCord": jar_path = self._dl_bungeecord(srv_dir, upd)
-            elif core == "Fabric":     jar_path = self._dl_fabric(ver, srv_dir, upd)
-            elif core == "Vanilla":    jar_path = self._dl_vanilla(ver, srv_dir, upd)
+            jar=""
+            if core=="Paper":       jar=self._dl_paper(ver,d,upd)
+            elif core=="Purpur":    jar=self._dl_purpur(ver,d,upd)
+            elif core=="Velocity":  jar=self._dl_velocity(d,upd)
+            elif core=="Waterfall": jar=self._dl_waterfall(d,upd)
+            elif core=="BungeeCord":jar=self._dl_bungeecord(d,upd)
+            elif core=="Fabric":    jar=self._dl_fabric(ver,d,upd)
+            elif core=="Vanilla":   jar=self._dl_vanilla(ver,d,upd)
             else:
-                # Non-downloadable: create placeholder
-                jar_path = os.path.join(srv_dir, f"{core.lower()}-server.jar")
-                upd(f"⚠ Place {core} jar manually at:\n{jar_path}")
-
+                jar=os.path.join(d,f"{core.lower()}-server.jar")
+                upd(f"⚠ Place {core} jar manually at:\n{jar}")
             for s in self.servers:
-                if s["name"] == srv["name"]:
-                    s["jar"] = jar_path
-                    break
-            save_servers(self.servers)
+                if s["name"]==srv["name"]: s["jar"]=jar; break
+            _save_json(SERVERS_F,self.servers)
+            for fname,content in [("eula.txt","eula=true\n"),
+                ("server.properties",f"server-port={srv['port']}\nonline-mode=false\nmotd=MiniLauncher\n")]:
+                fp=os.path.join(d,fname)
+                if not os.path.exists(fp):
+                    with open(fp,"w") as f: f.write(content)
+            upd(self._("srv_ready",core=core,ver=ver))
+            self.after(0,self._srv_refresh_list)
+            self.after(2500,lambda:self._safe_close(win))
+        except Exception as ex: upd(f"✗ {ex}")
 
-            # eula.txt
-            eula = os.path.join(srv_dir, "eula.txt")
-            if not os.path.exists(eula):
-                with open(eula, "w") as f:
-                    f.write("eula=true\n")
-
-            # server.properties
-            props = os.path.join(srv_dir, "server.properties")
-            if not os.path.exists(props):
-                with open(props, "w") as f:
-                    f.write(f"server-port={srv['port']}\n"
-                            "online-mode=false\n"
-                            "motd=MiniLauncher Server\n")
-
-            upd(self._("srv_ready", core=core, ver=ver))
-            self.after(0, self._srv_refresh_list)
-            self.after(2500, lambda: self._safe_close(win))
-
-        except Exception as ex:
-            upd(f"✗ Error: {ex}")
-
-    def _safe_close(self, win):
+    def _safe_close(self,win):
         try: win.destroy()
-        except Exception: pass
+        except: pass
 
-    def _dl_paper(self, ver, srv_dir, upd):
-        upd(f"Fetching Paper {ver} builds...")
-        builds   = http_get(
-            f"https://api.papermc.io/v2/projects/paper/versions/{ver}/builds",
-            timeout=10)
-        latest   = builds["builds"][-1]["build"]
-        jar_name = f"paper-{ver}-{latest}.jar"
-        url      = (f"https://api.papermc.io/v2/projects/paper/versions/{ver}"
-                    f"/builds/{latest}/downloads/{jar_name}")
-        dest     = os.path.join(srv_dir, jar_name)
-        upd(f"Downloading {jar_name}...")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"Paper {ver}  {int(d/t*100)}%  ({d//1024} KB)"))
-        return dest
+    def _dl_paper(self,ver,d,upd):
+        upd(f"Fetching Paper {ver}…")
+        b=http_get(f"https://api.papermc.io/v2/projects/paper/versions/{ver}/builds",timeout=10)
+        l=b["builds"][-1]["build"]; jar=f"paper-{ver}-{l}.jar"
+        dest=os.path.join(d,jar)
+        http_download(f"https://api.papermc.io/v2/projects/paper/versions/{ver}/builds/{l}/downloads/{jar}",
+                      dest,lambda dn,t:upd(f"Paper {ver}  {int(dn/t*100)}%  ({dn//1024} KB)")); return dest
+    def _dl_purpur(self,ver,d,upd):
+        upd(f"Fetching Purpur {ver}…")
+        data=http_get(f"https://api.purpurmc.org/v2/purpur/{ver}",timeout=10)
+        bid=data["builds"]["latest"]; dest=os.path.join(d,f"purpur-{ver}-{bid}.jar")
+        http_download(f"https://api.purpurmc.org/v2/purpur/{ver}/{bid}/download",
+                      dest,lambda dn,t:upd(f"Purpur {ver}  {int(dn/t*100)}%")); return dest
+    def _dl_velocity(self,d,upd):
+        upd("Fetching Velocity…")
+        b=http_get("https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds",timeout=10)
+        l=b["builds"][-1]["build"]; jar=f"velocity-3.3.0-SNAPSHOT-{l}.jar"
+        dest=os.path.join(d,jar)
+        http_download(f"https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds/{l}/downloads/{jar}",
+                      dest,lambda dn,t:upd(f"Velocity  {int(dn/t*100)}%")); return dest
+    def _dl_waterfall(self,d,upd):
+        upd("Fetching Waterfall…")
+        b=http_get("https://api.papermc.io/v2/projects/waterfall/versions/1.21/builds",timeout=10)
+        l=b["builds"][-1]["build"]; jar=f"waterfall-1.21-{l}.jar"
+        dest=os.path.join(d,jar)
+        http_download(f"https://api.papermc.io/v2/projects/waterfall/versions/1.21/builds/{l}/downloads/{jar}",
+                      dest,lambda dn,t:upd(f"Waterfall  {int(dn/t*100)}%")); return dest
+    def _dl_bungeecord(self,d,upd):
+        upd("Downloading BungeeCord…"); dest=os.path.join(d,"BungeeCord.jar")
+        http_download("https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar",
+                      dest,lambda dn,t:upd(f"BungeeCord  {int(dn/t*100) if t else 0}%")); return dest
+    def _dl_fabric(self,ver,d,upd):
+        upd(f"Fetching Fabric {ver}…")
+        inst=http_get("https://meta.fabricmc.net/v2/versions/installer",timeout=10)[0]["version"]
+        load=http_get("https://meta.fabricmc.net/v2/versions/loader",timeout=10)[0]["version"]
+        dest=os.path.join(d,f"fabric-server-{ver}.jar")
+        http_download(f"https://meta.fabricmc.net/v2/versions/loader/{ver}/{load}/{inst}/server/jar",
+                      dest,lambda dn,t:upd(f"Fabric {int(dn/t*100)}%")); return dest
+    def _dl_vanilla(self,ver,d,upd):
+        upd("Fetching manifest…")
+        mf=http_get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json",timeout=10)
+        vi=next((v for v in mf["versions"] if v["id"]==ver),None)
+        if not vi: raise ValueError(f"Version {ver} not found")
+        url=http_get(vi["url"],timeout=10)["downloads"]["server"]["url"]
+        dest=os.path.join(d,f"minecraft_server.{ver}.jar")
+        http_download(url,dest,lambda dn,t:upd(f"Vanilla {ver}  {int(dn/t*100)}%")); return dest
 
-    def _dl_purpur(self, ver, srv_dir, upd):
-        upd(f"Fetching Purpur {ver}...")
-        data     = http_get(f"https://api.purpurmc.org/v2/purpur/{ver}", timeout=10)
-        build_id = data["builds"]["latest"]
-        url      = f"https://api.purpurmc.org/v2/purpur/{ver}/{build_id}/download"
-        jar_name = f"purpur-{ver}-{build_id}.jar"
-        dest     = os.path.join(srv_dir, jar_name)
-        upd(f"Downloading {jar_name}...")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"Purpur {ver}  {int(d/t*100)}%  ({d//1024} KB)"))
-        return dest
-
-    def _dl_velocity(self, srv_dir, upd):
-        upd("Fetching Velocity builds...")
-        builds   = http_get(
-            "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds",
-            timeout=10)
-        latest   = builds["builds"][-1]["build"]
-        jar_name = f"velocity-3.3.0-SNAPSHOT-{latest}.jar"
-        url      = (f"https://api.papermc.io/v2/projects/velocity/versions"
-                    f"/3.3.0-SNAPSHOT/builds/{latest}/downloads/{jar_name}")
-        dest     = os.path.join(srv_dir, jar_name)
-        upd(f"Downloading {jar_name}...")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"Velocity  {int(d/t*100)}%  ({d//1024} KB)"))
-        return dest
-
-    def _dl_waterfall(self, srv_dir, upd):
-        upd("Fetching Waterfall builds...")
-        builds   = http_get(
-            "https://api.papermc.io/v2/projects/waterfall/versions/1.21/builds",
-            timeout=10)
-        latest   = builds["builds"][-1]["build"]
-        jar_name = f"waterfall-1.21-{latest}.jar"
-        url      = (f"https://api.papermc.io/v2/projects/waterfall/versions"
-                    f"/1.21/builds/{latest}/downloads/{jar_name}")
-        dest     = os.path.join(srv_dir, jar_name)
-        upd(f"Downloading {jar_name}...")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"Waterfall  {int(d/t*100)}%  ({d//1024} KB)"))
-        return dest
-
-    def _dl_bungeecord(self, srv_dir, upd):
-        upd("Downloading BungeeCord (latest)...")
-        url  = "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar"
-        dest = os.path.join(srv_dir, "BungeeCord.jar")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"BungeeCord  {int(d/t*100) if t else 0}%  ({d//1024} KB)"))
-        return dest
-
-    def _dl_fabric(self, ver, srv_dir, upd):
-        upd("Fetching Fabric installer info...")
-        installers  = http_get("https://meta.fabricmc.net/v2/versions/installer", timeout=10)
-        latest_inst = installers[0]["version"]
-        loaders     = http_get("https://meta.fabricmc.net/v2/versions/loader", timeout=10)
-        latest_load = loaders[0]["version"]
-        url  = (f"https://meta.fabricmc.net/v2/versions/loader/{ver}"
-                f"/{latest_load}/{latest_inst}/server/jar")
-        dest = os.path.join(srv_dir, f"fabric-server-{ver}.jar")
-        upd(f"Downloading Fabric server {ver}...")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"Fabric {ver}  {int(d/t*100)}%  ({d//1024} KB)"))
-        return dest
-
-    def _dl_vanilla(self, ver, srv_dir, upd):
-        upd("Fetching version manifest...")
-        manifest = http_get(
-            "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json",
-            timeout=10)
-        v_info = next((v for v in manifest["versions"] if v["id"] == ver), None)
-        if not v_info:
-            raise ValueError(f"Version {ver} not found in manifest")
-        ver_data = http_get(v_info["url"], timeout=10)
-        url  = ver_data["downloads"]["server"]["url"]
-        dest = os.path.join(srv_dir, f"minecraft_server.{ver}.jar")
-        upd(f"Downloading vanilla server {ver}...")
-        http_download(url, dest,
-                      progress_cb=lambda d, t: upd(
-                          f"Vanilla {ver}  {int(d/t*100)}%  ({d//1024} KB)"))
-        return dest
-
-    # ── Server start / stop ───────────────────────────────────────────────────
-    def _srv_start(self, name):
-        srv = next((s for s in self.servers if s["name"] == name), None)
-        if not srv:
-            return
-        jar = srv.get("jar", "")
+    def _srv_start(self,name):
+        srv=next((s for s in self.servers if s["name"]==name),None)
+        if not srv: return
+        jar=srv.get("jar","")
         if not jar or not os.path.exists(jar):
-            messagebox.showerror(self._("err_title"), self._("no_jar"))
-            return
-        ram = srv.get("ram", 1024)
-        cmd = ["java", f"-Xmx{ram}M", f"-Xms{min(ram,512)}M",
-               "-jar", jar, "nogui"]
+            messagebox.showerror(self._("err"),self._("no_jar")); return
+        java=self._find_java() or "java"; ram=srv.get("ram",1024)
+        cmd=[java,f"-Xmx{ram}M",f"-Xms{min(ram,512)}M","-jar",jar,"nogui"]
         try:
-            proc = subprocess.Popen(
-                cmd, cwd=srv["dir"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True)
-            self.server_processes[name] = proc
-            self._srv_refresh_list()
-            threading.Thread(target=self._srv_read_log,
-                             args=(name, proc), daemon=True).start()
-        except FileNotFoundError:
-            messagebox.showerror(self._("err_title"), self._("java_not_found"))
+            proc=subprocess.Popen(cmd,cwd=srv["dir"],stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            self.server_processes[name]=proc; self._srv_refresh_list()
+            threading.Thread(target=self._srv_read_log,args=(name,proc),daemon=True).start()
+        except FileNotFoundError: messagebox.showerror(self._("err"),self._("java_err"))
 
-    def _srv_stop(self, name):
-        proc = self.server_processes.get(name)
+    def _srv_stop(self,name):
+        proc=self.server_processes.get(name)
         if proc and proc.poll() is None:
-            try:
-                proc.stdin.write("stop\n")
-                proc.stdin.flush()
-            except Exception:
-                proc.terminate()
-        self.after(2000, self._srv_refresh_list)
+            try: proc.stdin.write("stop\n"); proc.stdin.flush()
+            except: proc.terminate()
+        self.after(2000,self._srv_refresh_list)
 
-    def _srv_read_log(self, name, proc):
-        for _ in proc.stdout:
-            pass
-        proc.wait()
-        self.after(500, self._srv_refresh_list)
+    def _srv_read_log(self,name,proc):
+        for line in proc.stdout:
+            if " joined the game" in line:
+                self._srv_join_counts[name]=self._srv_join_counts.get(name,0)+1
+        proc.wait(); self.after(500,self._srv_refresh_list)
 
-    def _srv_delete(self, name):
-        if not messagebox.askyesno(self._("warn_title"),
-                                   self._("delete_confirm", name=name)):
-            return
-        proc = self.server_processes.get(name)
-        if proc and proc.poll() is None:
-            proc.terminate()
-        srv = next((s for s in self.servers if s["name"] == name), None)
-        if srv and os.path.exists(srv.get("dir", "")):
-            shutil.rmtree(srv["dir"], ignore_errors=True)
-        self.servers = [s for s in self.servers if s["name"] != name]
-        save_servers(self.servers)
-        self._srv_refresh_list()
+    def _srv_delete(self,name):
+        if not messagebox.askyesno(self._("warn"),self._("delete_q",n=name)): return
+        proc=self.server_processes.get(name)
+        if proc and proc.poll() is None: proc.terminate()
+        srv=next((s for s in self.servers if s["name"]==name),None)
+        if srv and os.path.exists(srv.get("dir","")): shutil.rmtree(srv["dir"],ignore_errors=True)
+        self.servers=[s for s in self.servers if s["name"]!=name]
+        _save_json(SERVERS_F,self.servers); self._srv_refresh_list()
 
-    # ── Server console ────────────────────────────────────────────────────────
-    def _srv_open_console(self, name):
-        t    = self.t
-        proc = self.server_processes.get(name)
-        win  = tk.Toplevel(self)
-        win.title(f"Console — {name}")
-        win.geometry("680x460")
-        win.configure(bg=t["bg"])
-
-        tk.Label(win, text=f"Console: {name}", bg=t["bg"], fg=t["fg"],
-                 font=("Segoe UI", 11, "bold"), pady=10).pack()
-
-        log = scrolledtext.ScrolledText(
-            win, bg=t["bg2"], fg=t["acc"],
-            font=("Consolas", 9), relief="flat", bd=0,
-            state="disabled",
-            highlightthickness=1, highlightbackground=t["border"])
-        log.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-
-        cmd_row = tk.Frame(win, bg=t["bg"], padx=10, pady=6)
-        cmd_row.pack(fill="x")
-        cmd_var = tk.StringVar()
-        cmd_e = tk.Entry(cmd_row, textvariable=cmd_var,
-                         bg=t["entry"], fg=t["fg"], insertbackground=t["fg"],
-                         font=("Consolas", 10), relief="flat", bd=0,
-                         highlightbackground=t["border"], highlightthickness=1)
-        cmd_e.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
-
-        def send_cmd(*_):
+    def _srv_open_console(self,name):
+        p=_pal(); proc=self.server_processes.get(name)
+        win=ctk.CTkToplevel(self); win.title(f"Console — {name}"); win.geometry("720x480")
+        ctk.CTkLabel(win,text=f"Console: {name}",font=ctk.CTkFont(size=13,weight="bold")).pack(pady=(12,4))
+        log=ctk.CTkTextbox(win,font=ctk.CTkFont(family="Consolas",size=10),
+                            state="disabled",corner_radius=8)
+        log.pack(fill="both",expand=True,padx=12,pady=(0,6))
+        row=ctk.CTkFrame(win,fg_color="transparent"); row.pack(fill="x",padx=12,pady=(0,12))
+        cv=ctk.StringVar()
+        ce=ctk.CTkEntry(row,textvariable=cv,placeholder_text="command…",corner_radius=8)
+        ce.pack(side="left",fill="x",expand=True,padx=(0,8))
+        def send(*_):
             if proc and proc.poll() is None:
+                try: proc.stdin.write(cv.get()+"\n"); proc.stdin.flush(); cv.set("")
+                except: pass
+        ce.bind("<Return>",send)
+        self._btn(row,self._("send"),send,"acc").pack(side="left")
+        msg=self._("srv_on",n=name) if (proc and proc.poll() is None) else self._("srv_off",n=name)
+        self._tbox_append(log,msg+"\n")
+        if proc and proc.poll() is None:
+            def _read():
+                for line in proc.stdout: self.after(0,lambda l=line:self._tbox_append(log,l))
+            threading.Thread(target=_read,daemon=True).start()
+
+    def _tbox_append(self,w,text):
+        try: w.configure(state="normal"); w.insert("end",text); w.see("end"); w.configure(state="disabled")
+        except: pass
+
+    # ── Server Dashboard ──────────────────────────────────────────────────
+    def _srv_dashboard(self,name):
+        p=_pal(); proc=self.server_processes.get(name)
+        win=ctk.CTkToplevel(self); win.title(self._("dash_t",n=name)); win.geometry("700x520")
+        ctk.CTkLabel(win,text=self._("dash_t",n=name),
+                     font=ctk.CTkFont(size=14,weight="bold")).pack(pady=(14,8))
+        main=ctk.CTkFrame(win,fg_color="transparent"); main.pack(fill="both",expand=True,padx=16)
+        main.columnconfigure(0,weight=1); main.columnconfigure(1,weight=0)
+        left=ctk.CTkFrame(main,fg_color="transparent"); left.grid(row=0,column=0,sticky="nsew")
+        right=ctk.CTkFrame(main,width=200,fg_color="transparent"); right.grid(row=0,column=1,sticky="nsew",padx=(14,0))
+
+        ctk.CTkLabel(left,text=self._("dash_players"),font=ctk.CTkFont(size=12,weight="bold")).pack(anchor="w")
+        players_v=ctk.StringVar(value="—")
+        ctk.CTkLabel(left,textvariable=players_v,font=ctk.CTkFont(size=11),
+                     corner_radius=8,fg_color=p["bg3"],anchor="w").pack(fill="x",pady=(4,10),ipady=8)
+
+        act=ctk.CTkFrame(left,fg_color="transparent"); act.pack(fill="x",pady=(0,10))
+        pe=ctk.CTkEntry(act,placeholder_text="player name",width=160); pe.pack(side="left",padx=(0,8))
+        def mc_cmd(c):
+            pl=pe.get().strip()
+            if pl and proc and proc.poll() is None:
+                try: proc.stdin.write(f"{c} {pl}\n"); proc.stdin.flush()
+                except: pass
+        self._btn(act,self._("dash_op"),  lambda:mc_cmd("op"),  "ghost").pack(side="left",padx=2)
+        self._btn(act,self._("dash_kick"),lambda:mc_cmd("kick"),"ghost").pack(side="left",padx=2)
+        self._btn(act,self._("dash_ban"), lambda:mc_cmd("ban"), "ghost").pack(side="left",padx=2)
+
+        ctk.CTkLabel(left,text=self._("dash_cpu"),font=ctk.CTkFont(size=12,weight="bold")).pack(anchor="w")
+        ram_v=ctk.StringVar(value="—")
+        ctk.CTkLabel(left,textvariable=ram_v,font=ctk.CTkFont(family="Consolas",size=11),
+                     text_color=self._accent).pack(anchor="w",pady=(4,0))
+
+        ctk.CTkLabel(right,text=self._("dash_total"),font=ctk.CTkFont(size=11),text_color=p["fg2"]).pack(anchor="w")
+        total_v=ctk.StringVar(value=str(self._srv_join_counts.get(name,0)))
+        ctk.CTkLabel(right,textvariable=total_v,font=ctk.CTkFont(size=28,weight="bold"),
+                     text_color=self._accent).pack(anchor="w",pady=(0,12))
+        ctk.CTkLabel(right,text="Server log",font=ctk.CTkFont(size=11),text_color=p["fg2"]).pack(anchor="w")
+        mini=ctk.CTkTextbox(right,font=ctk.CTkFont(family="Consolas",size=8),
+                             state="disabled",height=240,corner_radius=8)
+        mini.pack(fill="both",expand=True)
+
+        def refresh():
+            if not win.winfo_exists(): return
+            if proc and proc.poll() is None:
+                try: proc.stdin.write("list\n"); proc.stdin.flush()
+                except: pass
                 try:
-                    proc.stdin.write(cmd_var.get() + "\n")
-                    proc.stdin.flush()
-                    cmd_var.set("")
-                except Exception as ex:
-                    self._console_append(log, f"Error: {ex}\n")
-
-        cmd_e.bind("<Return>", send_cmd)
-        self._btn(cmd_row, "Send", send_cmd, style="acc").pack(side="left")
-
-        msg = (self._("srv_running", name=name)
-               if (proc and proc.poll() is None)
-               else self._("srv_stopped", name=name))
-        self._console_append(log, msg + "\n")
-
+                    if sys.platform=="linux":
+                        with open(f"/proc/{proc.pid}/status") as pf:
+                            for line in pf:
+                                if "VmRSS" in line:
+                                    ram_v.set(f"RAM: {int(line.split()[1])//1024} MB"); break
+                    elif sys.platform=="win32":
+                        r=subprocess.check_output(f"wmic process where ProcessId={proc.pid} get WorkingSetSize",
+                                                  shell=True,text=True)
+                        nums=[x for x in r.split() if x.isdigit()]
+                        if nums: ram_v.set(f"RAM: {int(nums[0])//1048576} MB")
+                except: pass
+            win.after(3000,refresh)
+        win.after(500,refresh)
         if proc and proc.poll() is None:
             def _read():
                 for line in proc.stdout:
-                    self.after(0, lambda l=line: self._console_append(log, l))
-            threading.Thread(target=_read, daemon=True).start()
+                    if not win.winfo_exists(): break
+                    self.after(0,lambda l=line:self._tbox_append(mini,l))
+                    if " joined the game" in line:
+                        self._srv_join_counts[name]=self._srv_join_counts.get(name,0)+1
+                        self.after(0,lambda:total_v.set(str(self._srv_join_counts.get(name,0))))
+                    if "players online" in line.lower():
+                        self.after(0,lambda l=line:players_v.set(l.strip()))
+            threading.Thread(target=_read,daemon=True).start()
 
-    def _console_append(self, widget, text):
-        try:
-            widget.configure(state="normal")
-            widget.insert("end", text)
-            widget.see("end")
-            widget.configure(state="disabled")
-        except Exception:
-            pass
-
-    # ── Plugins (Modrinth project_type=plugin) ───────────────────────────────
-    def _srv_open_plugins(self, name):
-        t   = self.t
-        srv = next((s for s in self.servers if s["name"] == name), None)
-        if not srv:
-            return
-
-        win = tk.Toplevel(self)
-        win.title(self._("plugins_title", name=name))
-        win.geometry("700x520")
-        win.configure(bg=t["bg"])
-
-        tk.Label(win, text=self._("plugins_title", name=name),
-                 bg=t["bg"], fg=t["fg"],
-                 font=("Segoe UI", 12, "bold"), pady=10).pack()
-
-        sf = tk.Frame(win, bg=t["bg"], padx=14)
-        sf.pack(fill="x", pady=(0, 6))
-        q_var = tk.StringVar()
-        qe = tk.Entry(sf, textvariable=q_var,
-                      bg=t["entry"], fg=t["fg"], insertbackground=t["fg"],
-                      font=("Segoe UI", 11), relief="flat", bd=0,
-                      highlightbackground=t["border"], highlightthickness=1)
-        qe.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
-        status_var = tk.StringVar(value="Search plugins on Modrinth")
-        tk.Label(sf, textvariable=status_var, bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="right")
-
-        res_canvas = tk.Canvas(win, bg=t["bg"], highlightthickness=0)
-        vscr = tk.Scrollbar(win, orient="vertical", command=res_canvas.yview)
-        res_canvas.configure(yscrollcommand=vscr.set)
-        res_canvas.pack(side="left", fill="both", expand=True, padx=(14, 0))
-        vscr.pack(side="right", fill="y", padx=(0, 4))
-        res_frame = tk.Frame(res_canvas, bg=t["bg"])
-        _wid = res_canvas.create_window((0, 0), window=res_frame, anchor="nw")
-        res_frame.bind("<Configure>",
-            lambda e: res_canvas.configure(scrollregion=res_canvas.bbox("all")))
-        res_canvas.bind("<Configure>",
-            lambda e: res_canvas.itemconfig(_wid, width=e.width))
-
-        plugins_dir = os.path.join(srv["dir"], "plugins")
-        os.makedirs(plugins_dir, exist_ok=True)
-
-        def clear():
-            for w in res_frame.winfo_children():
-                w.destroy()
-
+    # ── Plugins ───────────────────────────────────────────────────────────
+    def _srv_open_plugins(self,name):
+        p=_pal(); srv=next((s for s in self.servers if s["name"]==name),None)
+        if not srv: return
+        win=ctk.CTkToplevel(self); win.title(self._("plugins_t",n=name)); win.geometry("720x540")
+        ctk.CTkLabel(win,text=self._("plugins_t",n=name),
+                     font=ctk.CTkFont(size=14,weight="bold")).pack(pady=(14,8))
+        sf=ctk.CTkFrame(win,fg_color="transparent"); sf.pack(fill="x",padx=14,pady=(0,6))
+        qv=ctk.StringVar(); st_v=ctk.StringVar(value="Search plugins on Modrinth")
+        qe=ctk.CTkEntry(sf,textvariable=qv,placeholder_text="plugin name…",corner_radius=8)
+        qe.pack(side="left",fill="x",expand=True,padx=(0,8))
+        ctk.CTkLabel(sf,textvariable=st_v,text_color=p["fg2"],font=ctk.CTkFont(size=10)).pack(side="right")
+        scroll=CTkScrollFrame2(win); scroll.pack(fill="both",expand=True,padx=14)
+        scroll.grid_columnconfigure(0,weight=1)
+        plugins_dir=os.path.join(srv["dir"],"plugins"); os.makedirs(plugins_dir,exist_ok=True)
         def add_card(item):
-            slug       = item.get("slug", "")
-            pname      = item.get("title", "?")
-            desc       = item.get("description", "")[:120]
-            downloads  = item.get("downloads", 0)
-            project_id = item.get("project_id", slug)
-            dl_fmt     = f"{downloads:,}".replace(",", " ")
+            pid=item.get("project_id",item.get("slug","")); pname=item.get("title","?")
+            desc=item.get("description","")[:120]; dl=item.get("downloads",0)
+            dl_fmt=f"{dl:,}".replace(",","_").replace("_"," ")
+            card=ctk.CTkFrame(scroll,corner_radius=8,fg_color=p["card"],
+                              border_width=1,border_color=p["border"])
+            card.pack(fill="x",pady=4)
+            ctk.CTkFrame(card,width=6,corner_radius=0,fg_color="#e05060").pack(side="left",fill="y")
+            body=ctk.CTkFrame(card,fg_color="transparent")
+            body.pack(side="left",fill="both",expand=True,padx=12,pady=8)
+            ctk.CTkLabel(body,text=pname,font=ctk.CTkFont(size=12,weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(body,text=desc,font=ctk.CTkFont(size=10),text_color=p["fg2"],
+                         wraplength=440).pack(anchor="w")
+            ctk.CTkLabel(body,text=f"⬇ {dl_fmt}",font=ctk.CTkFont(size=10),
+                         text_color=p["fg2"]).pack(anchor="w",pady=(2,0))
+            rb=ctk.CTkFrame(card,fg_color="transparent"); rb.pack(side="right",padx=8,pady=8)
+            self._btn(rb,"⬇ Get",lambda pid=pid:threading.Thread(
+                target=self._plugin_dl,args=(pid,plugins_dir,st_v,win),daemon=True).start(),"acc").pack()
+        def search(q=""):
+            for w in scroll.winfo_children(): w.destroy()
+            st_v.set("Searching…")
+            def bg():
+                api=MODRINTH_API[self.settings.get("modrinth_server","original")]
+                try:
+                    data=http_get(f"{api}/search",params={"query":q,"limit":20,
+                        "facets":json.dumps([["project_type:plugin"]])},timeout=10)
+                    hits=data.get("hits",[])
+                    self.after(0,lambda:st_v.set(f"Found: {len(hits)}"))
+                    for item in hits: self.after(0,lambda m=item:add_card(m))
+                except Exception as ex: self.after(0,lambda:st_v.set(f"Error: {ex}"))
+            threading.Thread(target=bg,daemon=True).start()
+        qe.bind("<Return>",lambda e:search(qv.get().strip()))
+        self._btn(sf,"Search",lambda:search(qv.get().strip()),"acc").pack(side="left")
+        search("")
 
-            card = tk.Frame(res_frame, bg=t["bg3"],
-                            highlightbackground=t["border"], highlightthickness=1)
-            card.pack(fill="x", pady=3, padx=4)
-            tk.Frame(card, bg="#e05060", width=4).pack(side="left", fill="y")
-            body = tk.Frame(card, bg=t["bg3"])
-            body.pack(side="left", fill="both", expand=True, padx=10, pady=6)
-            tk.Label(body, text=pname, bg=t["bg3"], fg=t["fg"],
-                     font=("Segoe UI", 10, "bold")).pack(anchor="w")
-            tk.Label(body, text=desc, bg=t["bg3"], fg=t["fg2"],
-                     font=("Segoe UI", 9), wraplength=430).pack(anchor="w")
-            tk.Label(body, text=f"⬇ {dl_fmt}", bg=t["bg3"], fg=t["fg2"],
-                     font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
-            rb = tk.Frame(card, bg=t["bg3"])
-            rb.pack(side="right", padx=8, pady=8)
-            self._btn(rb, "⬇ Download",
-                      lambda pid=project_id:
-                          threading.Thread(target=self._plugin_dl,
-                                           args=(pid, plugins_dir, status_var, win),
-                                           daemon=True).start(),
-                      style="acc").pack()
-
-        def search_worker(q):
-            self.after(0, clear)
-            self.after(0, lambda: status_var.set("Searching..."))
-            server = self.settings.get("modrinth_server", "original")
-            api    = MODRINTH_API[server]
-            try:
-                data = http_get(f"{api}/search", params={
-                    "query": q, "limit": 20,
-                    "facets": json.dumps([["project_type:plugin"]])
-                }, timeout=10)
-                hits = data.get("hits", [])
-                self.after(0, lambda: status_var.set(f"Found: {len(hits)}"))
-                for item in hits:
-                    self.after(0, lambda m=item: add_card(m))
-            except OSError:
-                self.after(0, lambda: status_var.set("No internet connection"))
-            except Exception as ex:
-                self.after(0, lambda: status_var.set(f"Error: {ex}"))
-
-        qe.bind("<Return>", lambda e: threading.Thread(
-            target=search_worker, args=(q_var.get().strip(),), daemon=True).start())
-        self._btn(sf, "Search",
-                  lambda: threading.Thread(target=search_worker,
-                                           args=(q_var.get().strip(),),
-                                           daemon=True).start(),
-                  style="acc").pack(side="left")
-
-        threading.Thread(target=search_worker, args=("",), daemon=True).start()
-
-    def _plugin_dl(self, project_id, plugins_dir, status_var, win):
-        server = self.settings.get("modrinth_server", "original")
-        api    = MODRINTH_API[server]
+    def _plugin_dl(self,pid,plugins_dir,st_v,win):
+        api=MODRINTH_API[self.settings.get("modrinth_server","original")]
         try:
-            self.after(0, lambda: status_var.set("Fetching versions..."))
-            versions = http_get(f"{api}/project/{project_id}/version", timeout=10)
-            if not versions:
-                self.after(0, lambda: status_var.set("No files"))
-                return
-            chosen  = versions[0]
-            files   = chosen.get("files", [])
-            target  = next((f for f in files if f.get("primary")), None) or (files[0] if files else None)
-            if not target:
-                self.after(0, lambda: status_var.set("No downloadable files"))
-                return
-            url      = target["url"]
-            filename = target.get("filename", url.split("/")[-1])
-            dest     = os.path.join(plugins_dir, filename)
+            self.after(0,lambda:st_v.set("Fetching…"))
+            vers=http_get(f"{api}/project/{pid}/version",timeout=10)
+            if not vers: self.after(0,lambda:st_v.set("No files")); return
+            files=vers[0].get("files",[])
+            target=next((f for f in files if f.get("primary")),None) or (files[0] if files else None)
+            if not target: self.after(0,lambda:st_v.set("No files")); return
+            url=target["url"]; fn=target.get("filename",url.split("/")[-1])
+            dest=os.path.join(plugins_dir,fn)
+            http_download(url,dest,lambda d,t:self.after(0,lambda:st_v.set(f"⬇ {fn}  {int(d/t*100)}%")))
+            self.after(0,lambda:st_v.set(f"✓ {fn}"))
+            self.after(0,lambda:messagebox.showinfo("Done",f"Saved:\n{plugins_dir}",parent=win))
+        except Exception as ex: self.after(0,lambda:st_v.set(f"✗ {ex}"))
 
-            def upd(done, total):
-                pct = int(done / total * 100)
-                self.after(0, lambda: status_var.set(f"⬇ {filename}  {pct}%"))
-
-            http_download(url, dest, progress_cb=upd)
-            self.after(0, lambda: status_var.set(f"✓ {filename}"))
-            self.after(0, lambda: messagebox.showinfo(
-                self._("downloaded_title"),
-                self._("plugin_downloaded", path=plugins_dir),
-                parent=win))
-        except Exception as ex:
-            self.after(0, lambda: status_var.set(f"✗ {ex}"))
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Modrinth page
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    #  MODRINTH PAGE
+    # ══════════════════════════════════════════════════════════════════════
     def _build_modrinth_page(self):
-        t = self.t
-        frame = tk.Frame(self.content, bg=t["bg"])
+        p=_pal()
+        frame=ctk.CTkFrame(self.content,corner_radius=0,fg_color=p["bg"])
+        frame.grid_columnconfigure(0,weight=1); frame.grid_rowconfigure(1,weight=1)
 
-        top = tk.Frame(frame, bg=t["bg2"], pady=10, padx=14)
-        top.pack(fill="x")
-        tk.Label(top, text=self._("modrinth_title"), bg=t["bg2"], fg=t["acc"],
-                 font=("Segoe UI", 13, "bold")).pack(side="left")
-        sf = tk.Frame(top, bg=t["bg2"])
-        sf.pack(side="left", padx=(14, 0), fill="x", expand=True)
-        self.mr_query_var = tk.StringVar()
-        e = tk.Entry(sf, textvariable=self.mr_query_var,
-                     bg=t["entry"], fg=t["fg"], insertbackground=t["fg"],
-                     font=("Segoe UI", 11), relief="flat", bd=0,
-                     highlightbackground=t["border"], highlightthickness=1)
-        e.pack(side="left", ipady=5, padx=(0, 6), fill="x", expand=True)
-        e.bind("<Return>", lambda ev: self._mr_search())
-        self._btn(sf, self._("btn_search"), self._mr_search, style="acc").pack(side="left")
+        # Top bar
+        top=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=52)
+        top.grid(row=0,column=0,sticky="ew"); top.grid_propagate(False)
+        top.grid_columnconfigure(1,weight=1)
+        ctk.CTkLabel(top,text=self._("modrinth_t"),font=ctk.CTkFont(size=16,weight="bold"),
+                     text_color=self._accent).grid(row=0,column=0,padx=20,pady=12)
+        sf=ctk.CTkFrame(top,fg_color="transparent"); sf.grid(row=0,column=1,sticky="ew",padx=(0,14))
+        sf.columnconfigure(0,weight=1)
+        self.mr_qv=ctk.StringVar()
+        qe=ctk.CTkEntry(sf,textvariable=self.mr_qv,placeholder_text=self._("hint"),
+                         corner_radius=8,height=36)
+        qe.grid(row=0,column=0,sticky="ew",padx=(0,8))
+        qe.bind("<Return>",lambda e:self._mr_search())
+        self._btn(sf,self._("search"),self._mr_search,"acc").grid(row=0,column=1)
 
-        fbar = tk.Frame(frame, bg=t["bg3"], pady=6, padx=14)
-        fbar.pack(fill="x")
-        tk.Label(fbar, text="Type:", bg=t["bg3"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="left")
-        self.mr_type_var  = tk.StringVar(value="")
-        self.mr_type_btns = {}
-        type_labels = [
-            ("",             self._("type_all")),
-            ("mod",          self._("type_mod")),
-            ("resourcepack", self._("type_rp")),
-            ("shader",       self._("type_shader")),
-            ("datapack",     self._("type_dp")),
-            ("modpack",      self._("type_mp")),
-        ]
-        for val, lbl in type_labels:
-            b = tk.Button(fbar, text=lbl, bg=t["bg3"], fg=t["fg2"],
-                          relief="flat", bd=0,
-                          font=("Segoe UI", 9), padx=8, pady=3,
-                          cursor="hand2", activebackground=t["border"],
-                          command=lambda v=val: self._mr_set_type(v))
-            b.pack(side="left", padx=2)
-            self.mr_type_btns[val] = b
+        # Filter bar
+        fbar=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg3"],height=44)
+        fbar.grid(row=1,column=0,sticky="ew"); fbar.grid_propagate(False)
+        fb_inner=ctk.CTkFrame(fbar,fg_color="transparent"); fb_inner.pack(side="left",padx=14,pady=6)
+        self.mr_type_var=ctk.StringVar(value="")
+        self.mr_type_btns={}
+        type_defs=[("",self._("all_types")),("mod",self._("mods")),("resourcepack",self._("rp")),
+                   ("shader",self._("shaders")),("datapack",self._("dp")),("modpack",self._("mp"))]
+        for val,lbl in type_defs:
+            b=ctk.CTkButton(fb_inner,text=lbl,width=80,height=28,corner_radius=6,
+                            font=ctk.CTkFont(size=11),
+                            fg_color="transparent",hover_color=p["border"],
+                            command=lambda v=val:self._mr_set_type(v))
+            b.pack(side="left",padx=2); self.mr_type_btns[val]=b
         self._mr_set_type("")
+        ctk.CTkLabel(fb_inner,text=self._("loader_lbl"),font=ctk.CTkFont(size=11),
+                     text_color=p["fg2"]).pack(side="left",padx=(12,4))
+        self.mr_loader_var=ctk.StringVar(value="")
+        lcb=ctk.CTkComboBox(fb_inner,variable=self.mr_loader_var,width=110,
+                             values=["","fabric","forge","quilt","neoforge"],state="readonly")
+        lcb.pack(side="left")
+        lcb.bind("<<ComboboxSelected>>",lambda e:self._mr_search())
+        # instance
+        ctk.CTkLabel(fb_inner,text=self._("inst_label"),font=ctk.CTkFont(size=11),
+                     text_color=p["fg2"]).pack(side="left",padx=(12,4))
+        self.mr_inst_var=ctk.StringVar(value="(default)")
+        self.mr_inst_combo=ctk.CTkComboBox(fb_inner,variable=self.mr_inst_var,
+                                            values=["(default)"]+[i["name"] for i in self.instances],
+                                            state="readonly",width=130)
+        self.mr_inst_combo.pack(side="left")
+        # status
+        self.mr_sv=ctk.StringVar(value=self._("hint"))
+        ctk.CTkLabel(fbar,textvariable=self.mr_sv,font=ctk.CTkFont(size=10),
+                     text_color=p["fg2"]).pack(side="right",padx=14)
 
-        tk.Label(fbar, text=self._("loader_label"), bg=t["bg3"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 0))
-        self.mr_loader_var = tk.StringVar(value="")
-        lcb = ttk.Combobox(fbar, textvariable=self.mr_loader_var,
-                           values=["", "fabric", "forge", "quilt", "neoforge"],
-                           state="readonly", width=10, font=("Segoe UI", 9))
-        lcb.pack(side="left", padx=(4, 0))
-        lcb.bind("<<ComboboxSelected>>", lambda e: self._mr_search())
-
-        self.mr_status_var = tk.StringVar(value=self._("status_hint"))
-        tk.Label(fbar, textvariable=self.mr_status_var,
-                 bg=t["bg3"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="right", padx=6)
-
-        wrap = tk.Frame(frame, bg=t["bg"])
-        wrap.pack(fill="both", expand=True)
-        self.mr_canvas = tk.Canvas(wrap, bg=t["bg"], highlightthickness=0)
-        vscr = tk.Scrollbar(wrap, orient="vertical", command=self.mr_canvas.yview)
-        self.mr_canvas.configure(yscrollcommand=vscr.set)
-        self.mr_canvas.pack(side="left", fill="both", expand=True)
-        vscr.pack(side="right", fill="y")
-        self.mr_list = tk.Frame(self.mr_canvas, bg=t["bg"])
-        self._mr_win_id = self.mr_canvas.create_window(
-            (0, 0), window=self.mr_list, anchor="nw")
-        self.mr_list.bind("<Configure>",
-            lambda e: self.mr_canvas.configure(
-                scrollregion=self.mr_canvas.bbox("all")))
-        self.mr_canvas.bind("<Configure>",
-            lambda e: self.mr_canvas.itemconfig(self._mr_win_id, width=e.width))
-        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.mr_canvas.bind(ev, self._mr_scroll)
-
+        # Results
+        self.mr_scroll=CTkScrollFrame2(frame)
+        self.mr_scroll.grid(row=2,column=0,sticky="nsew")
+        frame.grid_rowconfigure(2,weight=1)
+        self.mr_scroll.grid_columnconfigure(0,weight=1)
         return frame
 
-    def _mr_scroll(self, e):
-        if e.num == 4:   self.mr_canvas.yview_scroll(-1, "units")
-        elif e.num == 5: self.mr_canvas.yview_scroll(1, "units")
-        else:            self.mr_canvas.yview_scroll(-1*(e.delta//120), "units")
+    def _mr_auto_search(self):
+        if not self.mr_scroll.winfo_children():
+            threading.Thread(target=self._mr_search_worker,daemon=True).start()
 
-    def _mr_set_type(self, val):
-        t = self.t
+    def _mr_set_type(self,val):
+        p=_pal(); acc=self._accent
         self.mr_type_var.set(val)
-        for v, btn in self.mr_type_btns.items():
-            if v == val:
-                btn.configure(bg=t["acc"], fg=t["btn_fg"],
-                               font=("Segoe UI", 9, "bold"))
-            else:
-                btn.configure(bg=t["bg3"], fg=t["fg2"],
-                               font=("Segoe UI", 9))
+        for v,b in self.mr_type_btns.items():
+            b.configure(fg_color=acc if v==val else "transparent",
+                        text_color=("#000000" if ctk.get_appearance_mode()=="Light" else "#ffffff") if v==val else p["fg2"],
+                        font=ctk.CTkFont(size=11,weight="bold") if v==val else ctk.CTkFont(size=11))
 
     def _mr_search(self):
-        threading.Thread(target=self._mr_search_worker, daemon=True).start()
+        threading.Thread(target=self._mr_search_worker,daemon=True).start()
 
     def _mr_search_worker(self):
-        self.after(0, self._mr_clear)
-        self.after(0, lambda: self.mr_status_var.set("Searching..."))
-        query  = self.mr_query_var.get().strip()
-        ptype  = self.mr_type_var.get()
-        loader = self.mr_loader_var.get().strip()
-        server = self.settings.get("modrinth_server", "original")
-        api    = MODRINTH_API[server]
-        facets = []
-        if ptype:  facets.append([f"project_type:{ptype}"])
+        p=_pal()
+        self.after(0,lambda:[w.destroy() for w in self.mr_scroll.winfo_children()])
+        self.after(0,lambda:self.mr_sv.set("Searching…"))
+        query=self.mr_qv.get().strip(); ptype=self.mr_type_var.get()
+        loader=self.mr_loader_var.get().strip()
+        api=MODRINTH_API[self.settings.get("modrinth_server","original")]
+        facets=[]
+        if ptype: facets.append([f"project_type:{ptype}"])
         if loader: facets.append([f"categories:{loader}"])
-        params = {"query": query, "limit": 20}
-        if facets: params["facets"] = json.dumps(facets)
+        params={"query":query,"limit":20}
+        if facets: params["facets"]=json.dumps(facets)
         try:
-            data = http_get(f"{api}/search", params=params, timeout=10)
-            hits = data.get("hits", [])
-            srv_lbl = "api.modrinth.com" if server == "original" else "modrinth.black"
-            self.after(0, lambda: self.mr_status_var.set(
-                f"{len(hits)} results  •  {srv_lbl}"))
-            for item in hits:
-                self.after(0, lambda m=item: self._mr_add_card(m))
-        except OSError:
-            self.after(0, lambda: self.mr_status_var.set("No internet connection"))
-        except Exception as ex:
-            self.after(0, lambda: self.mr_status_var.set(f"Error: {ex}"))
+            data=http_get(f"{api}/search",params=params,timeout=10)
+            hits=data.get("hits",[])
+            srv_l="api.modrinth.com" if self.settings.get("modrinth_server")=="original" else "modrinth.black"
+            self.after(0,lambda:self.mr_sv.set(f"{len(hits)} results  •  {srv_l}"))
+            for item in hits: self.after(0,lambda m=item:self._mr_add_card(m))
+        except OSError: self.after(0,lambda:self.mr_sv.set("No connection"))
+        except Exception as ex: self.after(0,lambda:self.mr_sv.set(f"Error: {ex}"))
 
-    def _mr_clear(self):
-        for w in self.mr_list.winfo_children():
-            w.destroy()
+    def _mr_add_card(self,item):
+        p=_pal()
+        name=item.get("title","?"); desc=item.get("description","")[:150]
+        ptype=item.get("project_type","mod"); dl=item.get("downloads",0)
+        pid=item.get("project_id",item.get("slug",""))
+        vers=item.get("versions",[]); latest=vers[-1] if vers else "?"
+        dl_fmt=f"{dl:,}".replace(",","_").replace("_"," ")
+        stripe=STRIPE_C.get(ptype,"#888")
+        type_lbl={"mod":"MOD","resourcepack":"RP","shader":"SHADER","datapack":"DP","modpack":"MP"}.get(ptype,ptype.upper())
 
-    def _mr_add_card(self, item):
-        t          = self.t
-        slug       = item.get("slug", "")
-        name       = item.get("title", "?")
-        desc       = item.get("description", "")[:150]
-        ptype      = item.get("project_type", "mod")
-        downloads  = item.get("downloads", 0)
-        project_id = item.get("project_id", slug)
-        versions   = item.get("versions", [])
-        latest     = versions[-1] if versions else "?"
-        dl_fmt     = f"{downloads:,}".replace(",", " ")
-        stripe     = STRIPE_COLORS.get(ptype, "#888888")
-        type_lbl   = (TYPE_LABELS_EN if self._lang == "en" else TYPE_LABELS_RU).get(
-                      ptype, ptype.upper())
+        card=ctk.CTkFrame(self.mr_scroll,corner_radius=10,
+                          fg_color=p["card"],border_width=1,border_color=p["border"])
+        card.pack(fill="x",padx=8,pady=4)
+        ctk.CTkFrame(card,width=6,corner_radius=0,fg_color=stripe).pack(side="left",fill="y")
+        body=ctk.CTkFrame(card,fg_color="transparent")
+        body.pack(side="left",fill="both",expand=True,padx=12,pady=10)
+        tr=ctk.CTkFrame(body,fg_color="transparent"); tr.pack(anchor="w",fill="x")
+        ctk.CTkLabel(tr,text=name,font=ctk.CTkFont(size=12,weight="bold")).pack(side="left")
+        ctk.CTkLabel(tr,text=f"  {type_lbl}",text_color=stripe,
+                     font=ctk.CTkFont(size=10,weight="bold")).pack(side="left")
+        ctk.CTkLabel(body,text=desc,font=ctk.CTkFont(size=11),text_color=p["fg2"],
+                     anchor="w",justify="left",wraplength=500).pack(anchor="w",pady=(2,4))
+        ctk.CTkLabel(body,text=f"⬇ {dl_fmt}  •  latest: {latest}",
+                     font=ctk.CTkFont(size=10),text_color=p["fg2"]).pack(anchor="w")
+        bf=ctk.CTkFrame(card,fg_color="transparent"); bf.pack(side="right",padx=12,pady=10)
+        self._btn(bf,self._("download"),lambda pid=pid,pt=ptype:self._mr_pick_version(pid,pt),"acc").pack()
 
-        card = tk.Frame(self.mr_list, bg=t["bg3"],
-                        highlightbackground=t["border"], highlightthickness=1)
-        card.pack(fill="x", pady=3, padx=8)
-        tk.Frame(card, bg=stripe, width=4).pack(side="left", fill="y")
-        body = tk.Frame(card, bg=t["bg3"])
-        body.pack(side="left", fill="both", expand=True, padx=10, pady=8)
-        tr = tk.Frame(body, bg=t["bg3"])
-        tr.pack(anchor="w", fill="x")
-        tk.Label(tr, text=name, bg=t["bg3"], fg=t["fg"],
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
-        tk.Label(tr, text="  " + type_lbl, bg=t["bg3"], fg=stripe,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
-        tk.Label(body, text=desc, bg=t["bg3"], fg=t["fg2"],
-                 font=("Segoe UI", 9), anchor="w", justify="left",
-                 wraplength=500).pack(anchor="w", pady=(2, 4))
-        tk.Label(body, text=f"⬇ {dl_fmt}  •  latest: {latest}",
-                 bg=t["bg3"], fg=t["fg2"], font=("Segoe UI", 8)).pack(anchor="w")
-        bf = tk.Frame(card, bg=t["bg3"])
-        bf.pack(side="right", padx=10, pady=8)
-        self._btn(bf, self._("btn_download"),
-                  lambda pid=project_id, pt=ptype:
-                      self._mr_pick_version(pid, pt),
-                  style="acc").pack()
+    def _mr_pick_version(self,pid,ptype):
+        threading.Thread(target=lambda:self._mr_fetch_and_show(pid,ptype),daemon=True).start()
 
-    def _mr_pick_version(self, project_id, project_type):
-        threading.Thread(target=self._mr_fetch_versions,
-                         args=(project_id, project_type), daemon=True).start()
+    def _mr_fetch_and_show(self,pid,ptype):
+        api=MODRINTH_API[self.settings.get("modrinth_server","original")]
+        try: vers=http_get(f"{api}/project/{pid}/version",timeout=10)
+        except Exception as ex: self.after(0,lambda:messagebox.showerror(self._("err"),str(ex))); return
+        if not vers: self.after(0,lambda:messagebox.showinfo("Modrinth",self._("no_files"))); return
+        self.after(0,lambda:self._mr_ver_dialog(vers,ptype))
 
-    def _mr_fetch_versions(self, project_id, project_type):
-        server = self.settings.get("modrinth_server", "original")
-        api    = MODRINTH_API[server]
-        try:
-            versions = http_get(f"{api}/project/{project_id}/version", timeout=10)
-        except Exception as ex:
-            self.after(0, lambda: messagebox.showerror(self._("err_title"), str(ex)))
-            return
-        if not versions:
-            self.after(0, lambda: messagebox.showinfo("Modrinth", self._("no_files")))
-            return
-        self.after(0, lambda: self._mr_version_dialog(versions, project_type))
-
-    def _mr_version_dialog(self, versions, project_type):
-        t   = self.t
-        win = tk.Toplevel(self)
-        win.title(self._("choose_ver"))
-        win.geometry("500x380")
-        win.configure(bg=t["bg"])
-        win.grab_set()
-        tk.Label(win, text=self._("choose_ver"), bg=t["bg"], fg=t["fg"],
-                 font=("Segoe UI", 11, "bold"), pady=12).pack()
-        lf = tk.Frame(win, bg=t["bg"])
-        lf.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-        sb = tk.Scrollbar(lf)
-        sb.pack(side="right", fill="y")
-        lb = tk.Listbox(lf, bg=t["bg3"], fg=t["fg"],
-                        font=("Segoe UI", 10), relief="flat", bd=0,
-                        selectbackground=t["sel"], selectforeground=t["fg"],
-                        activestyle="none",
-                        highlightthickness=1, highlightbackground=t["border"],
-                        yscrollcommand=sb.set)
-        lb.pack(side="left", fill="both", expand=True)
-        sb.config(command=lb.yview)
-        for v in versions:
-            vname   = v.get("name", v.get("version_number", "?"))
-            mc_v    = ", ".join(v.get("game_versions", [])[:3])
-            loaders = ", ".join(v.get("loaders", []))
-            lb.insert("end", f"  {vname}  •  MC {mc_v}  •  {loaders}")
-        if versions:
-            lb.selection_set(0)
-        br = tk.Frame(win, bg=t["bg"], pady=8)
-        br.pack()
-
+    def _mr_ver_dialog(self,versions,ptype):
+        p=_pal()
+        win=ctk.CTkToplevel(self); win.title(self._("choose_ver")); win.geometry("520x400"); win.grab_set()
+        ctk.CTkLabel(win,text=self._("choose_ver"),font=ctk.CTkFont(size=14,weight="bold")).pack(pady=(14,8))
+        lb_frame=ctk.CTkScrollableFrame(win,fg_color=p["bg3"],corner_radius=8)
+        lb_frame.pack(fill="both",expand=True,padx=16,pady=(0,8))
+        selected=[0]
+        btns_list=[]
+        for i,v in enumerate(versions):
+            vn=v.get("name",v.get("version_number","?")); mc_v=", ".join(v.get("game_versions",[])[:3])
+            ldr=", ".join(v.get("loaders",[]))
+            btn=ctk.CTkButton(lb_frame,text=f"{vn}  •  MC {mc_v}  •  {ldr}",
+                              anchor="w",corner_radius=6,fg_color="transparent",
+                              hover_color=p["border"],font=ctk.CTkFont(size=11),
+                              command=lambda idx=i:(
+                                  [b.configure(fg_color="transparent") for b in btns_list],
+                                  btns_list[idx].configure(fg_color=p["sel"]),
+                                  selected.__setitem__(0,idx)))
+            btn.pack(fill="x",pady=2); btns_list.append(btn)
+        if btns_list: btns_list[0].configure(fg_color=p["sel"])
+        br=ctk.CTkFrame(win,fg_color="transparent"); br.pack(pady=8)
         def do_dl():
-            sel = lb.curselection()
-            if not sel: return
-            chosen  = versions[sel[0]]
-            files   = chosen.get("files", [])
-            primary = next((f for f in files if f.get("primary")), None)
-            target  = primary or (files[0] if files else None)
-            if not target:
-                messagebox.showwarning("Modrinth", self._("no_files"))
-                return
-            url      = target["url"]
-            filename = target.get("filename", url.split("/")[-1])
-            dest_dir = CONTENT_DIRS.get(project_type, CONTENT_DIRS["mod"])
-            dest     = os.path.join(dest_dir, filename)
-            win.destroy()
-            threading.Thread(target=self._mr_download,
-                             args=(url, dest, filename), daemon=True).start()
+            i=selected[0]; chosen=versions[i]; files=chosen.get("files",[])
+            primary=next((f for f in files if f.get("primary")),None)
+            target=primary or (files[0] if files else None)
+            if not target: messagebox.showwarning("Modrinth",self._("no_files")); return
+            url=target["url"]; fn=target.get("filename",url.split("/")[-1])
+            inst_name=self.mr_inst_var.get()
+            if inst_name!="(default)":
+                inst=next((ii for ii in self.instances if ii["name"]==inst_name),None)
+                dest_dir=(inst.get("mods_dir",inst.get("dir","")) if inst else os.path.join(MC_DIR,"mods"))
+            else:
+                dest_dir={"mod":os.path.join(MC_DIR,"mods"),"resourcepack":os.path.join(MC_DIR,"resourcepacks"),
+                          "shader":os.path.join(MC_DIR,"shaderpacks"),"datapack":os.path.join(MC_DIR,"datapacks")
+                          }.get(ptype,os.path.join(MC_DIR,"mods"))
+            os.makedirs(dest_dir,exist_ok=True)
+            dest=os.path.join(dest_dir,fn); win.destroy()
+            threading.Thread(target=self._mr_download,args=(url,dest,fn),daemon=True).start()
+        self._btn(br,self._("download"),do_dl,"acc").pack(side="left",padx=4)
+        self._btn(br,self._("cancel"),win.destroy,"ghost").pack(side="left",padx=4)
 
-        self._btn(br, self._("btn_download"), do_dl, style="acc").pack(side="left", padx=4)
-        self._btn(br, self._("btn_cancel"), win.destroy, style="ghost").pack(side="left", padx=4)
-
-    def _mr_download(self, url, dest, filename):
-        def upd(done, total):
-            pct = int(done / total * 100)
-            self.after(0, lambda: self.mr_status_var.set(
-                f"⬇ {filename}  {pct}%  ({done//1024} KB)"))
+    def _mr_download(self,url,dest,fn):
+        def upd(d,t): self.after(0,lambda:self.mr_sv.set(f"⬇ {fn}  {int(d/t*100)}%  ({d//1024} KB)"))
         try:
-            self.after(0, lambda: self.mr_status_var.set(f"Downloading {filename}..."))
-            http_download(url, dest, progress_cb=upd)
-            self.after(0, lambda: self.mr_status_var.set(f"✓ {filename} saved"))
-            self.after(0, lambda: messagebox.showinfo(
-                self._("downloaded_title"),
-                f"{filename}\n\n{os.path.dirname(dest)}"))
-        except Exception as ex:
-            self.after(0, lambda: self.mr_status_var.set(f"✗ {ex}"))
-            self.after(0, lambda: messagebox.showerror(self._("err_title"), str(ex)))
+            self.after(0,lambda:self.mr_sv.set(f"Downloading {fn}…"))
+            http_download(url,dest,progress_cb=upd)
+            self.after(0,lambda:self.mr_sv.set(f"✓ {fn} saved"))
+            self.after(0,lambda:messagebox.showinfo("Downloaded!",f"{fn}\n\n{os.path.dirname(dest)}"))
+        except Exception as ex: self.after(0,lambda:self.mr_sv.set(f"✗ {ex}"))
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Settings page
-    # ══════════════════════════════════════════════════════════════════════════
-    def _build_settings_page(self):
-        t = self.t
-        frame = tk.Frame(self.content, bg=t["bg"])
-
-        hdr = tk.Frame(frame, bg=t["bg2"], pady=12)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text=self._("settings_title"), bg=t["bg2"], fg=t["fg"],
-                 font=("Segoe UI", 14, "bold"), padx=20).pack(side="left")
-
-        inner = tk.Frame(frame, bg=t["bg"], padx=24, pady=18)
-        inner.pack(fill="both", expand=True)
-
-        def sep():
-            tk.Frame(inner, bg=t["border"], height=1).pack(
-                fill="x", pady=(10, 8))
-
-        def row_f():
-            r = tk.Frame(inner, bg=t["bg"])
-            r.pack(fill="x", pady=4)
-            return r
-
-        def lbl(p, text, w=22):
-            return tk.Label(p, text=text, bg=t["bg"], fg=t["fg"],
-                            font=("Segoe UI", 10), width=w, anchor="w")
-
-        def ent(p, var, w=24, font=("Segoe UI", 10)):
-            return tk.Entry(p, textvariable=var,
-                            bg=t["entry"], fg=t["fg"],
-                            insertbackground=t["fg"],
-                            font=font, relief="flat", bd=0, width=w,
-                            highlightbackground=t["border"],
-                            highlightthickness=1)
-
-        # Username
-        r = row_f()
-        lbl(r, self._("username_lbl")).pack(side="left")
-        self.username_var = tk.StringVar(value=self.settings["username"])
-        ent(r, self.username_var).pack(side="left")
-
-        # RAM
-        r = row_f()
-        lbl(r, self._("ram_lbl")).pack(side="left")
-        self.ram_var = tk.IntVar(value=self.settings["ram"])
-        self.ram_lbl_w = tk.Label(r, text=f"{self.settings['ram']} MB",
-                                  bg=t["bg"], fg=t["acc"],
-                                  font=("Segoe UI", 10, "bold"), width=8)
-        self.ram_lbl_w.pack(side="right")
-        tk.Scale(r, from_=512, to=16384, resolution=512,
-                 variable=self.ram_var, orient="horizontal",
-                 bg=t["bg"], fg=t["fg"], troughcolor=t["bg3"],
-                 highlightthickness=0, relief="flat",
-                 showvalue=False, length=200,
-                 command=lambda v: self.ram_lbl_w.configure(
-                     text=f"{int(float(v))} MB")
-                 ).pack(side="left", padx=(0, 6))
-
-        # JVM
-        r = row_f()
-        lbl(r, self._("jvm_lbl")).pack(side="left")
-        self.jvm_var = tk.StringVar(value=self.settings.get("jvm_args", ""))
-        ent(r, self.jvm_var, w=30, font=("Consolas", 9)).pack(side="left")
-
-        sep()
-
-        # Language
-        r = row_f()
-        lbl(r, self._("lang_lbl")).pack(side="left")
-        self.lang_var = tk.StringVar(value=self.settings.get("language", "en"))
-        for val, display in [("en", "English"), ("ru", "Русский")]:
-            tk.Radiobutton(r, text=display, variable=self.lang_var, value=val,
-                           bg=t["bg"], fg=t["fg"], selectcolor=t["bg3"],
-                           activebackground=t["bg"],
-                           font=("Segoe UI", 10)).pack(side="left", padx=(0, 14))
-
-        sep()
-
-        # Modrinth server
-        tk.Label(inner, text=self._("modrinth_server_lbl"),
-                 bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 6))
-        self.modrinth_server_var = tk.StringVar(
-            value=self.settings.get("modrinth_server", "original"))
-        for val, nk, hint in [
-            ("original",  "mr_original", "api.modrinth.com"),
-            ("mirror_rf", "mr_mirror",   "modrinth.black"),
-        ]:
-            r = tk.Frame(inner, bg=t["bg"])
-            r.pack(anchor="w", pady=2)
-            tk.Radiobutton(r, text=self._(nk),
-                           variable=self.modrinth_server_var, value=val,
-                           bg=t["bg"], fg=t["fg"],
-                           selectcolor=t["bg3"], activebackground=t["bg"],
-                           font=("Segoe UI", 10)).pack(side="left")
-            tk.Label(r, text=hint, bg=t["bg"], fg=t["fg2"],
-                     font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
-
-        sep()
-
-        # Update check
-        r = row_f()
-        lbl(r, self._("update_check_lbl")).pack(side="left")
-        self.update_check_var = tk.BooleanVar(
-            value=self.settings.get("check_updates", True))
-        tk.Checkbutton(r, variable=self.update_check_var,
-                       bg=t["bg"], fg=t["fg"],
-                       selectcolor=t["bg3"],
-                       activebackground=t["bg"]).pack(side="left")
-
-        # Manual check button
-        r2 = row_f()
-        self._btn(r2, "🔍  Check for updates now",
-                  self._manual_update_check, style="ghost").pack(side="left")
-        self.update_status_lbl = tk.Label(r2, text="",
-                                          bg=t["bg"], fg=t["acc"],
-                                          font=("Segoe UI", 9))
-        self.update_status_lbl.pack(side="left", padx=10)
-
-        sep()
-
-        # Paths
-        r = row_f()
-        lbl(r, self._("mc_folder")).pack(side="left")
-        tk.Label(r, text=MC_DIR, bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="left")
-        r2 = row_f()
-        lbl(r2, self._("srv_folder")).pack(side="left")
-        tk.Label(r2, text=SERVERS_DIR, bg=t["bg"], fg=t["fg2"],
-                 font=("Segoe UI", 9)).pack(side="left")
-
-        sep()
-        self._btn(inner, self._("btn_save"),
-                  self._save_settings, style="acc").pack(anchor="w")
-
+    # ══════════════════════════════════════════════════════════════════════
+    #  LAN PAGE
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_lan_page(self):
+        p=_pal()
+        frame=ctk.CTkFrame(self.content,corner_radius=0,fg_color=p["bg"])
+        frame.grid_columnconfigure(0,weight=1); frame.grid_rowconfigure(1,weight=1)
+        hdr=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=52)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        ctk.CTkLabel(hdr,text=self._("lan_t"),font=ctk.CTkFont(size=16,weight="bold")
+                     ).pack(side="left",padx=20,pady=12)
+        self._btn(hdr,self._("lan_refresh"),
+                  lambda:threading.Thread(target=self._lan_scan,daemon=True).start(),"ghost"
+                  ).pack(side="right",padx=16,pady=10)
+        self.lan_sv=ctk.StringVar(value=self._("lan_searching"))
+        ctk.CTkLabel(frame,textvariable=self.lan_sv,font=ctk.CTkFont(size=12),
+                     text_color=p["fg2"]).grid(row=1,column=0,pady=6)
+        self.lan_scroll=CTkScrollFrame2(frame)
+        self.lan_scroll.grid(row=2,column=0,sticky="nsew")
+        frame.grid_rowconfigure(2,weight=1)
         return frame
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Helpers
-    # ══════════════════════════════════════════════════════════════════════════
-    def _btn(self, parent, text, cmd, style="ghost"):
-        t = self.t
-        if style == "acc":
-            bg, fg, abg = t["acc"], t["btn_fg"], t["acc_h"]
-        else:
-            bg, fg, abg = t["bg3"], t["fg"], t["border"]
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=bg, fg=fg, activebackground=abg,
-                         activeforeground=fg,
-                         font=("Segoe UI", 10, "bold"),
-                         relief="flat", bd=0,
-                         padx=12, pady=6, cursor="hand2")
+    def _lan_scan(self):
+        self.after(0,lambda:self.lan_sv.set(self._("lan_searching")))
+        self.after(0,lambda:[w.destroy() for w in self.lan_scroll.winfo_children()])
+        found=[]
+        try:
+            sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            sock.settimeout(3.0)
+            try: sock.bind(("",4445))
+            except: pass
+            deadline=time.time()+4.0
+            while time.time()<deadline:
+                try:
+                    data,addr=sock.recvfrom(1024)
+                    msg=data.decode("utf-8",errors="replace")
+                    motd_m=re.search(r"\[MOTD\](.*?)\[/MOTD\]",msg)
+                    port_m=re.search(r"\[AD\](\d+)\[/AD\]",msg)
+                    if port_m:
+                        entry={"ip":addr[0],"port":int(port_m.group(1)),
+                               "motd":motd_m.group(1) if motd_m else "LAN Server"}
+                        if entry not in found: found.append(entry)
+                except socket.timeout: break
+                except: break
+            sock.close()
+        except: pass
+        self.after(0,lambda:self._lan_show(found))
 
-    def _log(self, msg):
+    def _lan_show(self,servers):
+        p=_pal()
+        for w in self.lan_scroll.winfo_children(): w.destroy()
+        if not servers:
+            self.lan_sv.set(self._("lan_none"))
+            ctk.CTkLabel(self.lan_scroll,text=self._("lan_none"),
+                         text_color=p["fg2"],font=ctk.CTkFont(size=13)).pack(pady=40); return
+        self.lan_sv.set(f"Found {len(servers)} server(s)")
+        for srv in servers:
+            card=ctk.CTkFrame(self.lan_scroll,corner_radius=10,
+                              fg_color=p["card"],border_width=1,border_color=p["border"])
+            card.pack(fill="x",padx=16,pady=5)
+            ctk.CTkFrame(card,width=6,corner_radius=0,fg_color=self._accent).pack(side="left",fill="y")
+            info=ctk.CTkFrame(card,fg_color="transparent")
+            info.pack(side="left",fill="both",expand=True,padx=14,pady=10)
+            ctk.CTkLabel(info,text=srv.get("motd","LAN Server"),font=ctk.CTkFont(size=13,weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(info,text=f"{srv['ip']}:{srv['port']}",
+                         text_color=p["fg2"],font=ctk.CTkFont(size=11)).pack(anchor="w",pady=(2,0))
+            btns=ctk.CTkFrame(card,fg_color="transparent"); btns.pack(side="right",padx=10,pady=8)
+            self._btn(btns,self._("btn_join"),lambda s=srv:self._lan_join(s),"acc").pack()
+
+    def _lan_join(self,srv):
+        ver=self.version_var.get() or (self.installed_versions[0] if self.installed_versions else "")
+        if not ver: messagebox.showwarning(self._("warn"),self._("select_ver")); return
+        if ver not in self.installed_versions:
+            if messagebox.askyesno(self._("warn"),self._("install_q",ver=ver)):
+                threading.Thread(target=lambda:(self._install_worker(ver),self._lan_join(srv)),daemon=True).start()
+            return
+        threading.Thread(target=self._launch_to_server,args=(ver,srv["ip"],str(srv["port"])),daemon=True).start()
+
+    def _launch_to_server(self,ver,ip,port):
+        acc=self._get_active_account()
+        user=acc["username"] if acc else self.settings["username"]
+        uuid=acc.get("uuid","00000000-0000-0000-0000-000000000000") if acc else "00000000-0000-0000-0000-000000000000"
+        token=acc.get("access_token","0") if acc else "0"
+        ram=self.settings["ram"]; jvm=self.settings.get("jvm_args",""); java=self._find_java() or "java"
+        options={"username":user,"uuid":uuid,"token":token,
+                 "jvmArguments":[f"-Xmx{ram}M",f"-Xms{min(ram,512)}M"]+(jvm.split() if jvm else []),
+                 "server":ip,"port":port}
+        try:
+            cmd=minecraft_launcher_lib.command.get_minecraft_command(ver,MC_DIR,options)
+            if cmd and cmd[0].endswith(("java","java.exe")): cmd[0]=java
+            subprocess.Popen(cmd,cwd=MC_DIR)
+        except Exception as ex: self.after(0,lambda:messagebox.showerror(self._("err"),str(ex)))
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  SETTINGS PAGE
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_settings_page(self):
+        p=_pal()
+        frame=ctk.CTkFrame(self.content,corner_radius=0,fg_color=p["bg"])
+        frame.grid_columnconfigure(0,weight=1); frame.grid_rowconfigure(1,weight=1)
+        hdr=ctk.CTkFrame(frame,corner_radius=0,fg_color=p["bg2"],height=52)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        ctk.CTkLabel(hdr,text=self._("settings_t"),font=ctk.CTkFont(size=16,weight="bold")
+                     ).pack(side="left",padx=20,pady=12)
+
+        body=CTkScrollFrame2(frame); body.grid(row=1,column=0,sticky="nsew")
+        body.grid_columnconfigure(0,weight=1)
+
+        def sec(title):
+            CTkSep(body)
+            ctk.CTkLabel(body,text=title,font=ctk.CTkFont(size=12,weight="bold"),
+                         text_color=p["fg2"]).pack(anchor="w",padx=20,pady=(0,6))
+
+        def row():
+            r=ctk.CTkFrame(body,fg_color="transparent"); r.pack(fill="x",padx=20,pady=3); return r
+
+        def lbl_entry(r,lbl_text,var,w=220,ph=""):
+            ctk.CTkLabel(r,text=lbl_text,width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+            e=ctk.CTkEntry(r,textvariable=var,width=w,placeholder_text=ph,corner_radius=8)
+            e.pack(side="left"); return e
+
+        # ── Game ─────────────────────────────────────────────────────────
+        ctk.CTkLabel(body,text="",height=8,fg_color="transparent").pack()
+        r=row(); ctk.CTkLabel(r,text=self._("username_l"),width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        self.username_var=ctk.StringVar(value=self.settings["username"])
+        ctk.CTkEntry(r,textvariable=self.username_var,width=220,corner_radius=8).pack(side="left")
+
+        r=row(); ctk.CTkLabel(r,text=self._("ram_l"),width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        self.ram_var=ctk.IntVar(value=self.settings["ram"])
+        self.ram_disp=ctk.CTkLabel(r,text=f"{self.settings['ram']} MB",
+                                    width=70,font=ctk.CTkFont(size=12,weight="bold"),text_color=self._accent)
+        self.ram_disp.pack(side="right",padx=8)
+        ctk.CTkSlider(r,from_=512,to=16384,number_of_steps=31,variable=self.ram_var,
+                      command=lambda v:self.ram_disp.configure(text=f"{int(v)} MB"),
+                      progress_color=self._accent,width=220).pack(side="left")
+
+        r=row(); ctk.CTkLabel(r,text=self._("jvm_l"),width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        self.jvm_var=ctk.StringVar(value=self.settings.get("jvm_args",""))
+        ctk.CTkEntry(r,textvariable=self.jvm_var,width=320,corner_radius=8,
+                     font=ctk.CTkFont(family="Consolas",size=11)).pack(side="left")
+
+        sec("Language / Interface")
+        r=row(); ctk.CTkLabel(r,text=self._("lang_l"),width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        self.lang_var=ctk.StringVar(value=self.settings.get("language","en"))
+        ctk.CTkRadioButton(r,text="English",variable=self.lang_var,value="en").pack(side="left",padx=(0,16))
+        ctk.CTkRadioButton(r,text="Русский",variable=self.lang_var,value="ru").pack(side="left")
+
+        r=row(); ctk.CTkLabel(r,text="Theme:",width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        self.theme_var=ctk.StringVar(value=self.settings.get("theme","dark"))
+        ctk.CTkComboBox(r,variable=self.theme_var,
+                         values=["dark","light","midnight","forest","ocean"],
+                         state="readonly",width=180).pack(side="left")
+
+        sec(self._("accent_t"))
+        r=row()
+        self.accent_preview=ctk.CTkFrame(r,width=36,height=36,corner_radius=6,
+                                          fg_color=self.settings.get("accent_color","#5dbb63"))
+        self.accent_preview.pack(side="left",padx=(0,10))
+        self.accent_hex_var=ctk.StringVar(value=self.settings.get("accent_color","#5dbb63"))
+        ace=ctk.CTkEntry(r,textvariable=self.accent_hex_var,width=100,corner_radius=8); ace.pack(side="left",padx=(0,8))
+        def pv(*_):
+            c=self.accent_hex_var.get().strip()
+            if re.match(r"^#[0-9a-fA-F]{6}$",c): self.accent_preview.configure(fg_color=c)
+        self.accent_hex_var.trace_add("write",pv)
+        self._btn(r,self._("pick_color"),self._pick_accent,"ghost").pack(side="left")
+        # swatches
+        sw=ctk.CTkFrame(body,fg_color="transparent"); sw.pack(anchor="w",padx=20,pady=(4,0))
+        for c in ["#5dbb63","#3a8fd9","#e05050","#e0a020","#9b59b6","#20b0e0","#e07830","#d4a017","#e0507a","#50e0c0"]:
+            b=ctk.CTkButton(sw,text="",width=24,height=24,corner_radius=6,
+                            fg_color=c,hover_color=_lerp_color(c,"#ffffff",0.2),
+                            command=lambda col=c:(self.accent_hex_var.set(col),self.accent_preview.configure(fg_color=col)))
+            b.pack(side="left",padx=2)
+
+        sec(self._("gradient_t"))
+        r=row()
+        self.gradient_var=ctk.BooleanVar(value=self.settings.get("gradient_theme",False))
+        ctk.CTkCheckBox(r,text=self._("gradient_en"),variable=self.gradient_var).pack(side="left")
+        r2=row()
+        ctk.CTkLabel(r2,text=self._("grad_c1"),width=80,font=ctk.CTkFont(size=11),anchor="w").pack(side="left")
+        self.grad_c1_var=ctk.StringVar(value=self.settings.get("gradient_colors",["#5dbb63","#3a8fd9"])[0])
+        ctk.CTkEntry(r2,textvariable=self.grad_c1_var,width=100,corner_radius=8).pack(side="left",padx=(0,16))
+        ctk.CTkLabel(r2,text=self._("grad_c2"),width=80,font=ctk.CTkFont(size=11),anchor="w").pack(side="left")
+        self.grad_c2_var=ctk.StringVar(value=self.settings.get("gradient_colors",["#5dbb63","#3a8fd9"])[1])
+        ctk.CTkEntry(r2,textvariable=self.grad_c2_var,width=100,corner_radius=8).pack(side="left")
+
+        sec(self._("mr_server"))
+        r=row()
+        self.mr_srv_var=ctk.StringVar(value=self.settings.get("modrinth_server","original"))
+        ctk.CTkRadioButton(r,text=self._("mr_orig")+" (api.modrinth.com)",
+                           variable=self.mr_srv_var,value="original").pack(side="left",padx=(0,16))
+        ctk.CTkRadioButton(r,text=self._("mr_mirror")+" (modrinth.black)",
+                           variable=self.mr_srv_var,value="mirror_rf").pack(side="left")
+
+        sec(self._("java_t"))
+        r=row()
+        self._btn(r,self._("java_check"),self._check_java_manual,"ghost").pack(side="left")
+        self.java_path_lbl=ctk.CTkLabel(r,text="",font=ctk.CTkFont(size=10),text_color=p["fg2"])
+        self.java_path_lbl.pack(side="left",padx=10)
+        r2=row()
+        self._btn(r2,self._("auto_dl_java"),
+                  lambda:threading.Thread(target=self._download_java,daemon=True).start(),"ghost").pack(side="left")
+        self.java_dl_var=ctk.StringVar(value="")
+        ctk.CTkLabel(r2,textvariable=self.java_dl_var,text_color=self._accent,
+                     font=ctk.CTkFont(size=10)).pack(side="left",padx=10)
+
+        sec("Updates")
+        r=row()
+        ctk.CTkLabel(r,text=self._("upd_check"),width=160,anchor="w",font=ctk.CTkFont(size=12)).pack(side="left")
+        self.upd_var=ctk.BooleanVar(value=self.settings.get("check_updates",True))
+        ctk.CTkCheckBox(r,text="",variable=self.upd_var,width=40).pack(side="left")
+        r2=row()
+        self._btn(r2,"🔍  Check now",self._manual_update_check,"ghost").pack(side="left")
+        self.upd_status_v=ctk.StringVar(value="")
+        ctk.CTkLabel(r2,textvariable=self.upd_status_v,text_color=self._accent,
+                     font=ctk.CTkFont(size=10)).pack(side="left",padx=10)
+
+        sec("Paths")
+        for lk,path in [("mc_folder",MC_DIR),("srv_folder",SERVERS_DIR)]:
+            r=row()
+            ctk.CTkLabel(r,text=self._(lk),width=160,anchor="w",font=ctk.CTkFont(size=11)).pack(side="left")
+            ctk.CTkLabel(r,text=path,text_color=p["fg2"],font=ctk.CTkFont(size=10)).pack(side="left")
+
+        ctk.CTkLabel(body,text="",height=8,fg_color="transparent").pack()
+        self._btn(body,self._("save_btn"),self._save_settings,"acc").pack(padx=20,pady=(0,20),anchor="w")
+        return frame
+
+    def _pick_accent(self):
+        c=colorchooser.askcolor(color=self.accent_hex_var.get(),title="Pick accent color")[1]
+        if c: self.accent_hex_var.set(c); self.accent_preview.configure(fg_color=c)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  JAVA
+    # ══════════════════════════════════════════════════════════════════════
+    def _find_java_async(self):
+        threading.Thread(target=self._find_java_bg,daemon=True).start()
+
+    def _find_java_bg(self):
+        p=self._find_java()
+        if p:
+            self._java_path=p
+            self.after(0,lambda:self.java_status_lbl.configure(text="☕ Java found"))
+        else:
+            self.after(0,lambda:self.java_status_lbl.configure(text="⚠ Java not found",text_color="#e05050"))
+
+    def _find_java(self):
+        import shutil as sh
+        for root,dirs,files in os.walk(JAVA_DIR):
+            for f in files:
+                if f in ("java","java.exe"): return os.path.join(root,f)
+        jh=os.environ.get("JAVA_HOME","")
+        if jh:
+            for sub in ("bin/java","bin/java.exe"):
+                pp=os.path.join(jh,sub)
+                if os.path.exists(pp): return pp
+        j=sh.which("java")
+        if j: return j
+        return None
+
+    def _check_java_manual(self):
+        p=self._find_java()
+        try:
+            if p:
+                self._java_path=p; self.java_path_lbl.configure(text=p[:60]); self.java_status_lbl.configure(text="☕ Java found")
+            else: self.java_path_lbl.configure(text="Not found")
+        except: pass
+
+    def _download_java(self):
+        def upd(m):
+            try: self.after(0,lambda:self.java_dl_var.set(m))
+            except: pass
+        try:
+            upd(self._("java_dl",ver=21))
+            os_name=JAVA_OS_MAP.get(sys.platform,"linux")
+            assets=http_get(JAVA_API.format(major=21,os=os_name),timeout=15)
+            if not assets: upd("No assets found"); return
+            pkg=assets[0].get("binary",{}).get("package",{})
+            dl_url=pkg.get("link",""); fn=pkg.get("name","jre.tar.gz")
+            if not dl_url: upd("No download URL"); return
+            dest=os.path.join(JAVA_DIR,fn)
+            http_download(dl_url,dest,lambda d,t:upd(f"Java 21  {int(d/t*100)}%  ({d//1048576} MB)"))
+            upd("Extracting…")
+            if fn.endswith(".zip"):
+                import zipfile
+                with zipfile.ZipFile(dest) as z: z.extractall(JAVA_DIR)
+            elif fn.endswith((".tar.gz",".tgz")):
+                import tarfile
+                with tarfile.open(dest) as tar: tar.extractall(JAVA_DIR)
+            os.remove(dest); self._find_java_bg(); upd(self._("java_ok",ver=21))
+        except Exception as ex: upd(f"✗ {ex}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  UPDATE CHECK
+    # ══════════════════════════════════════════════════════════════════════
+    def _bg_update_check(self):
+        try:
+            data=http_get(GITHUB_API,timeout=8)
+            tag=data.get("tag_name",""); url=data.get("html_url",GITHUB_REL); body=data.get("body","")
+            if _ver_tuple(tag)>_ver_tuple(APP_VERSION):
+                self._update_info=(tag,url,body); self.after(0,self._show_update_banner)
+        except: pass
+
+    def _show_update_banner(self):
+        try: self.update_banner.grid(row=13,column=0,sticky="ew",padx=8,pady=(0,8))
+        except: pass
+
+    def _open_update_page(self):
+        if self._update_info:
+            tag,url,body=self._update_info
+            if messagebox.askyesno(self._("upd_title"),
+                                   self._("upd_msg",tag=tag,body=body[:300])):
+                webbrowser.open(url)
+
+    def _manual_update_check(self):
+        self.upd_status_v.set(self._("checking"))
+        def _do():
+            try:
+                data=http_get(GITHUB_API,timeout=8)
+                tag=data.get("tag_name",""); url=data.get("html_url",GITHUB_REL); body=data.get("body","")
+                if _ver_tuple(tag)>_ver_tuple(APP_VERSION):
+                    self._update_info=(tag,url,body); self.after(0,self._show_update_banner); self.after(0,self._open_update_page)
+                else: self.after(0,lambda:self.upd_status_v.set(self._("upd_no")))
+            except Exception as ex: self.after(0,lambda:self.upd_status_v.set(f"Error: {ex}"))
+        threading.Thread(target=_do,daemon=True).start()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  GRADIENT ANIMATION
+    # ══════════════════════════════════════════════════════════════════════
+    def _anim_gradient(self):
+        if not self.settings.get("gradient_theme",False): return
+        cols=self.settings.get("gradient_colors",["#5dbb63","#3a8fd9"])
+        t2=abs(((self._grad_t%1.0)*2)-1.0)
+        blended=_lerp_color(cols[0],cols[1],t2)
+        self._accent=blended
+        try:
+            self._logo_btn.configure(text_color=blended)
+            self.progress_bar.configure(progress_color=blended)
+        except: pass
+        self._grad_t=(self._grad_t+0.004)%1.0
+        self.after(60,self._anim_gradient)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  HELPERS
+    # ══════════════════════════════════════════════════════════════════════
+    def _btn(self,parent,text,cmd,style="ghost"):
+        acc=self._accent
+        if style=="acc":
+            return ctk.CTkButton(parent,text=text,command=cmd,
+                                  fg_color=acc,hover_color=_lerp_color(acc,"#000000",0.18),
+                                  text_color="#ffffff",corner_radius=8,
+                                  font=ctk.CTkFont(size=12,weight="bold"))
+        else:
+            p=_pal()
+            return ctk.CTkButton(parent,text=text,command=cmd,
+                                  fg_color=p["bg3"],hover_color=p["border"],
+                                  text_color=p["fg"],corner_radius=8,
+                                  font=ctk.CTkFont(size=12))
+
+    def _log(self,msg):
         def _do():
             self.log_text.configure(state="normal")
-            self.log_text.insert("end", msg + "\n")
-            self.log_text.see("end")
+            self.log_text.insert("end",msg+"\n"); self.log_text.see("end")
             self.log_text.configure(state="disabled")
-        self.after(0, _do)
+        self.after(0,_do)
 
-    def _set_progress(self, val, label=""):
-        self.after(0, lambda: self.progress_var.set(val))
-        self.after(0, lambda: self.progress_label.configure(text=label))
+    def _set_progress(self,val,label=""):
+        self.after(0,lambda:self.progress_bar.set(val/100))
+        self.after(0,lambda:self.progress_lbl.configure(text=label))
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  MC versions
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    #  MC VERSIONS
+    # ══════════════════════════════════════════════════════════════════════
     def _load_versions_async(self):
-        threading.Thread(target=self._load_versions, daemon=True).start()
+        threading.Thread(target=self._load_versions,daemon=True).start()
 
     def _load_versions(self):
-        self._log("Fetching Minecraft version list...")
+        self._log("Fetching Minecraft versions…")
         try:
-            self.mc_versions = minecraft_launcher_lib.utils.get_version_list()
-            self._filter_versions()
-            self._refresh_installed()
+            self.mc_versions=minecraft_launcher_lib.utils.get_version_list()
+            self._filter_versions(); self._refresh_installed()
             self._log(f"Loaded {len(self.mc_versions)} versions")
-        except Exception as ex:
-            self._log(f"Error: {ex}")
+        except Exception as ex: self._log(f"Error: {ex}")
 
     def _filter_versions(self):
-        vtype    = self.ver_type_var.get()
-        filtered = [v["id"] for v in self.mc_versions if v["type"] == vtype]
+        vtype=self.ver_type_var.get()
+        filtered=[v["id"] for v in self.mc_versions if v["type"]==vtype]
         def _do():
-            self.version_combo["values"] = filtered
+            self.version_combo.configure(values=filtered)
             if filtered:
-                last = self.settings.get("last_version", "")
+                last=self.settings.get("last_version","")
                 self.version_var.set(last if last in filtered else filtered[0])
-        self.after(0, _do)
+        self.after(0,_do)
 
     def _refresh_installed(self):
         try:
-            inst = minecraft_launcher_lib.utils.get_installed_versions(MC_DIR)
-            self.installed_versions = [v["id"] for v in inst]
-        except Exception:
-            self.installed_versions = []
+            inst=minecraft_launcher_lib.utils.get_installed_versions(MC_DIR)
+            self.installed_versions=[v["id"] for v in inst]
+        except: self.installed_versions=[]
         def _do():
-            self.installed_listbox.delete(0, "end")
-            for v in self.installed_versions:
-                self.installed_listbox.insert("end", "  " + v)
-            if not self.installed_versions:
-                self.installed_listbox.insert("end", "  No installed versions")
-        self.after(0, _do)
+            self.installed_lb.configure(state="normal"); self.installed_lb.delete("1.0","end")
+            if self.installed_versions:
+                for v in self.installed_versions: self.installed_lb.insert("end","  "+v+"\n")
+            else:
+                self.installed_lb.insert("end","  No installed versions\n")
+            self.installed_lb.configure(state="disabled")
+        self.after(0,_do)
 
-    def _on_installed_select(self, event):
-        sel = self.installed_listbox.curselection()
-        if sel and sel[0] < len(self.installed_versions):
-            self.version_var.set(self.installed_versions[sel[0]])
+    def _on_inst_lb_select(self,event): pass  # handled by combobox
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  MC install / launch
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    #  INSTALL / LAUNCH
+    # ══════════════════════════════════════════════════════════════════════
     def _install_version(self):
-        ver = self.version_var.get()
-        if not ver:
-            messagebox.showwarning(self._("warn_title"), self._("select_version"))
-            return
-        threading.Thread(target=self._install_worker, args=(ver,), daemon=True).start()
+        ver=self.version_var.get()
+        if not ver: messagebox.showwarning(self._("warn"),self._("select_ver")); return
+        threading.Thread(target=self._install_worker,args=(ver,),daemon=True).start()
 
-    def _install_worker(self, ver):
-        self._log(self._("installing", ver=ver))
-        self._set_progress(0, self._("installing", ver=ver))
-        callbacks = {
-            "setStatus":   lambda s: self._log(f"  {s}"),
-            "setProgress": lambda v: None,
-            "setMax":      lambda v: None,
-        }
+    def _install_worker(self,ver,target_dir=None):
+        d=target_dir or MC_DIR
+        self._log(self._("installing",ver=ver)); self._set_progress(0,self._("installing",ver=ver))
+        cbs={"setStatus":lambda s:self._log(f"  {s}"),
+             "setProgress":lambda v:None,"setMax":lambda v:None}
         try:
-            minecraft_launcher_lib.install.install_minecraft_version(
-                ver, MC_DIR, callback=callbacks)
-            self._log(self._("installed_ok", ver=ver))
-            self._set_progress(100, self._("installed_ok", ver=ver))
+            minecraft_launcher_lib.install.install_minecraft_version(ver,d,callback=cbs)
+            self._log(self._("inst_ok",ver=ver)); self._set_progress(100,self._("inst_ok",ver=ver))
             self._refresh_installed()
-        except Exception as ex:
-            self._log(f"✗ {ex}")
-            self._set_progress(0, "Error")
+        except Exception as ex: self._log(f"✗ {ex}"); self._set_progress(0,"Error")
 
     def _launch_game(self):
-        ver = self.version_var.get()
-        if not ver:
-            messagebox.showwarning(self._("warn_title"), self._("select_version"))
-            return
+        ver=self.version_var.get()
+        if not ver: messagebox.showwarning(self._("warn"),self._("select_ver")); return
         if ver not in self.installed_versions:
-            if messagebox.askyesno("MiniLauncher",
-                                   self._("install_prompt", ver=ver)):
-                def _i():
-                    self._install_worker(ver)
-                    self.after(0, self._launch_game)
-                threading.Thread(target=_i, daemon=True).start()
+            if messagebox.askyesno("MiniLauncher",self._("install_q",ver=ver)):
+                def _i(): self._install_worker(ver); self.after(0,self._launch_game)
+                threading.Thread(target=_i,daemon=True).start()
             return
-        threading.Thread(target=self._launch_worker, args=(ver,), daemon=True).start()
+        threading.Thread(target=self._launch_worker,args=(ver,),daemon=True).start()
 
-    def _launch_worker(self, ver):
-        ram  = self.settings["ram"]
-        user = self.settings["username"]
-        jvm  = self.settings.get("jvm_args", "")
-        self._log(self._("launching", ver=ver, user=user, ram=ram))
-        self._set_progress(50, "Preparing...")
-        options = {
-            "username":    user,
-            "uuid":        "00000000-0000-0000-0000-000000000000",
-            "token":       "0",
-            "jvmArguments": [f"-Xmx{ram}M", f"-Xms{min(ram,512)}M"] + (
-                jvm.split() if jvm else []),
-        }
+    def _launch_worker(self,ver):
+        acc=self._get_active_account()
+        user  = acc["username"] if acc else self.settings["username"]
+        uuid  = acc.get("uuid","00000000-0000-0000-0000-000000000000") if acc else "00000000-0000-0000-0000-000000000000"
+        token = acc.get("access_token","0") if acc else "0"
+        ram=self.settings["ram"]; jvm=self.settings.get("jvm_args",""); java=self._find_java() or "java"
+        inst_name=self.play_inst_var.get()
+        inst=next((i for i in self.instances if i["name"]==inst_name),None) if inst_name!="(default)" else None
+        game_dir=inst["dir"] if inst else MC_DIR
+        self._log(self._("launching",ver=ver,user=user)); self._set_progress(50,"Preparing…")
+        options={"username":user,"uuid":uuid,"token":token,
+                 "jvmArguments":[f"-Xmx{ram}M",f"-Xms{min(ram,512)}M"]+(jvm.split() if jvm else [])}
         try:
-            cmd = minecraft_launcher_lib.command.get_minecraft_command(
-                ver, MC_DIR, options)
-        except Exception as ex:
-            self._log(f"✗ {ex}")
-            self._set_progress(0, "")
-            return
-        self._log("Launching...")
-        self._set_progress(100, "Game running!")
-        self.settings["last_version"] = ver
-        save_settings(self.settings)
+            cmd=minecraft_launcher_lib.command.get_minecraft_command(ver,game_dir,options)
+            if cmd and cmd[0].endswith(("java","java.exe")): cmd[0]=java
+        except Exception as ex: self._log(f"✗ {ex}"); self._set_progress(0,""); return
+        self._log("Launching…"); self._set_progress(100,"Game running!")
+        self.settings["last_version"]=ver; _save_json(SETTINGS_F,self.settings)
         try:
-            proc = subprocess.Popen(
-                cmd, cwd=MC_DIR,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            proc=subprocess.Popen(cmd,cwd=game_dir,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
             for line in proc.stdout:
-                line = line.rstrip()
-                if line:
-                    self._log(f"[MC] {line}")
-            proc.wait()
-            self._log(self._("game_closed", code=proc.returncode))
-            self._set_progress(0, "Game closed")
-        except FileNotFoundError:
-            self._log("✗ Java not found!")
-            messagebox.showerror(self._("err_title"), self._("java_not_found"))
-            self._set_progress(0, "")
-        except Exception as ex:
-            self._log(f"✗ {ex}")
-            self._set_progress(0, "")
+                line=line.rstrip()
+                if line: self._log(f"[MC] {line}")
+            proc.wait(); self._log(self._("closed",code=proc.returncode)); self._set_progress(0,"Game closed")
+        except FileNotFoundError: self._log("✗ Java not found!"); messagebox.showerror(self._("err"),self._("java_err")); self._set_progress(0,"")
+        except Exception as ex: self._log(f"✗ {ex}"); self._set_progress(0,"")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  Save settings / theme
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    #  SAVE / TOGGLE
+    # ══════════════════════════════════════════════════════════════════════
     def _save_settings(self):
+        old_lang=self.settings.get("language","en")
         self.settings["username"]        = self.username_var.get().strip() or "Player"
         self.settings["ram"]             = self.ram_var.get()
         self.settings["jvm_args"]        = self.jvm_var.get().strip()
-        self.settings["modrinth_server"] = self.modrinth_server_var.get()
-        self.settings["check_updates"]   = self.update_check_var.get()
-        old_lang = self.settings.get("language", "en")
-        new_lang = self.lang_var.get()
-        self.settings["language"] = new_lang
-        save_settings(self.settings)
-        messagebox.showinfo("MiniLauncher", self._("saved_ok"))
-        if new_lang != old_lang:
-            messagebox.showinfo("MiniLauncher", self._("restart_lang"))
+        self.settings["modrinth_server"] = self.mr_srv_var.get()
+        self.settings["check_updates"]   = self.upd_var.get()
+        self.settings["language"]        = self.lang_var.get()
+        self.settings["theme"]           = self.theme_var.get()
+        self.settings["accent_color"]    = self.accent_hex_var.get().strip()
+        self.settings["gradient_theme"]  = self.gradient_var.get()
+        self.settings["gradient_colors"] = [self.grad_c1_var.get().strip(),
+                                             self.grad_c2_var.get().strip()]
+        _save_json(SETTINGS_F,self.settings)
+        messagebox.showinfo("MiniLauncher",self._("saved"))
+        if self.settings["language"]!=old_lang: messagebox.showinfo("MiniLauncher",self._("restart_t"))
+        if self.settings["gradient_theme"] and self._grad_t==0.0: self.after(100,self._anim_gradient)
 
     def _toggle_theme(self):
-        self.settings["theme"] = (
-            "light" if self.settings["theme"] == "dark" else "dark")
-        save_settings(self.settings)
-        messagebox.showinfo("MiniLauncher", self._("restart_theme"))
+        themes=["dark","light","midnight","forest","ocean"]
+        cur=self.settings.get("theme","dark")
+        nxt=themes[(themes.index(cur)+1)%len(themes)] if cur in themes else "dark"
+        self.settings["theme"]=nxt; _save_json(SETTINGS_F,self.settings)
+        messagebox.showinfo("MiniLauncher",f"Theme: {nxt}\n{self._('restart_t')}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    app = MiniLauncher()
+if __name__=="__main__":
+    app=MiniLauncher()
     app.mainloop()
